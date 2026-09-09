@@ -326,6 +326,22 @@ Tensor::Tensor(const Tensor& other)
     }
 }
 
+Tensor::Tensor(
+    std::vector<size_t> shape,
+    Device device
+)
+    : shape_(std::move(shape)),
+      device_(device) {
+    rank_ = shape_.size();
+
+    size_ = 1;
+    for (size_t dim : shape_) {
+        size_ *= dim;
+    }
+
+    Allocate();
+}
+
 Tensor::Tensor(Tensor&& other) noexcept
     : shape_(std::move(other.shape_)),
       data_(other.data_),

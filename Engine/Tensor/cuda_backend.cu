@@ -1,5 +1,8 @@
+#pragma once
+
 #include "../Tensor/tensor.h"
 #include "cuda_backend.h"
+#include <cublas_v2.h>
 
 CUDABackend::CUDABackend() {
     cublasCreate(&handle_);

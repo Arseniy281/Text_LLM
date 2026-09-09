@@ -44,6 +44,7 @@ public:
     static Tensor Random(std::vector<size_t> shape, float min = 0.0f, float max = 1.0f);
     Tensor(std::vector<size_t> shape, std::vector<float> data);
     Tensor(std::vector<size_t> shape, float k, Device device);
+    Tensor(std::vector<size_t> shape, Device device);
     Tensor() = default;
 
     ~Tensor();
