@@ -242,15 +242,18 @@ Tensor::Tensor(
 
 Tensor::Tensor(std::vector<size_t> shape, float k, Device device)
         : shape_(std::move(shape)), device_(device) {
-
+            
     rank_ = shape_.size();
     size_ = 1;
-
     for (size_t dim : shape_) {
         size_ *= dim;
     }
 
     Allocate();
+
+    if (size_ == 0) {
+        return;
+    }
 
     if (device_ == Device::CPU) {
         for (size_t i = 0; i < size_; ++i) {
@@ -258,24 +261,36 @@ Tensor::Tensor(std::vector<size_t> shape, float k, Device device)
         }
         return;
     }
-    if (k != 0.0f) {
 
-        throw std::runtime_error(
-            "Tensor CUDA scalar initialization "
-            "currently supports only zero"
+    if (k == 0.0f) {
+        cudaError_t error = cudaMemset(
+            data_,
+            0,
+            size_ * sizeof(float)
         );
+
+        if (error != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("cudaMemset failed: ") +
+                cudaGetErrorString(error)
+            );
+        }
+
+        return;
     }
 
-    cudaError_t error = cudaMemset(
+    std::vector<float> host_data(size_, k);
+
+    cudaError_t error = cudaMemcpy(
         data_,
-        0,
-        size_ * sizeof(float)
+        host_data.data(),
+        size_ * sizeof(float),
+        cudaMemcpyHostToDevice
     );
 
     if (error != cudaSuccess) {
-
         throw std::runtime_error(
-            std::string("cudaMemset failed: ") +
+            std::string("CUDA scalar initialization failed: ") +
             cudaGetErrorString(error)
         );
     }
