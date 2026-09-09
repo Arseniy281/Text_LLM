@@ -788,14 +788,14 @@ void TestPredictions(
 // Prepare tokens
 // ============================================================
 
-std::vector<int> PrepareBatch(
+std::vector<size_t> PrepareBatch(
     const std::string& text,
     BPETokenizer& tokenizer
 ) {
     std::vector<size_t> ids =
         tokenizer.Encode(text);
 
-    std::vector<int> tokens;
+    std::vector<size_t> tokens;
 
     for (size_t id : ids) {
         tokens.push_back(
@@ -878,7 +878,7 @@ int main() {
         std::cerr << "Vocabulary size: "
                   << vocab_size << "\n";
 
-        std::vector<int> tokens = tokenizer.Encode("hello world");
+        std::vector<size_t> tokens = tokenizer.Encode("hello world");
 
         std::cerr << "Tokens: ";
 
