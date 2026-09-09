@@ -826,6 +826,62 @@ void PrintTokens(
         << std::endl;
 }
 
+void TestCrossEntropy() {
+    std::cout << "\n========================================\n";
+    std::cout << "       CROSS ENTROPY TEST\n";
+    std::cout << "========================================\n";
+
+    // [batch=1, seq=1, vocab=4]
+    Tensor logits(
+        {1, 1, 4},
+        std::vector<float>{0.0f, 0.0f, 0.0f, 0.0f},
+        Device::CUDA
+    );
+
+    Tensor targets(
+        {1, 1},
+        std::vector<float>{2.0f},
+        Device::CUDA
+    );
+
+    CrossEntropyLoss loss;
+
+    Tensor result = loss.forward(logits, targets);
+
+    std::vector<float> host_loss(1);
+
+    cudaMemcpy(
+        host_loss.data(),
+        result.Data(),
+        sizeof(float),
+        cudaMemcpyDeviceToHost
+    );
+
+    std::cout << "Loss: " << host_loss[0] << "\n";
+    std::cout << "Expected: 1.386294\n";
+
+    Tensor grad = loss.backward();
+
+    std::vector<float> host_grad(4);
+
+    cudaMemcpy(
+        host_grad.data(),
+        grad.Data(),
+        4 * sizeof(float),
+        cudaMemcpyDeviceToHost
+    );
+
+    std::cout << "Gradient:\n";
+
+    for (float x : host_grad) {
+        std::cout << x << " ";
+    }
+
+    std::cout << "\n";
+    std::cout << "Expected:\n";
+    std::cout << "0.25 0.25 -0.75 0.25\n";
+}
+
 
 // ============================================================
 // MAIN
@@ -1187,6 +1243,7 @@ int main() {
         std::cout << "       CUDA TEST PASSED\n";
         std::cout << "========================================\n";
 
+        TestCrossEntropy();
         return 0;
     }
     catch (const std::exception& e) {
