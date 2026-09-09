@@ -585,29 +585,12 @@ void Tensor::backward(const Tensor& grad_output) {
     std::vector<Tensor*> graph;
     std::unordered_set<Tensor*> visited;
 
-    std::cerr << "\nBACKWARD: "
-          << tensor->grad_fn_->Name()
-          << "\n";
-
-std::cerr << "tensor shape: ";
-for (size_t x : tensor->GetShape()) {
-    std::cerr << x << " ";
-}
-std::cerr << "\n";
-
-std::cerr << "grad shape: ";
-for (size_t x : tensor->Grad()->GetShape()) {
-    std::cerr << x << " ";
-}
-std::cerr << "\n";
-
     BuildBackwardGraph(
         graph,
         visited
     );
 
     AddGrad(grad_output);
-
 
     size_t operation_index = 0;
 
@@ -637,6 +620,31 @@ std::cerr << "\n";
                 ) + operation_name
             );
         }
+
+        // ============================================
+        // DEBUG
+        // ============================================
+
+        std::cerr << "\nBACKWARD #" << operation_index
+                  << ": " << operation_name << "\n";
+
+        std::cerr << "tensor shape: ";
+
+        for (size_t x : tensor->GetShape()) {
+            std::cerr << x << " ";
+        }
+
+        std::cerr << "\ngrad shape: ";
+
+        for (size_t x : tensor->grad_->GetShape()) {
+            std::cerr << x << " ";
+        }
+
+        std::cerr << "\n";
+
+        // ============================================
+        // END DEBUG
+        // ============================================
 
         std::vector<std::shared_ptr<Tensor>> inputs =
             tensor->grad_fn_->GetInputs();
