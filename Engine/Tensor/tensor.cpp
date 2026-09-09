@@ -626,12 +626,16 @@ void Tensor::SetGradFn(std::shared_ptr<Operation> op) {
 
 void Tensor::backward(const Tensor& grad_output) {
 
+    std::cerr << "\n[TENSOR BACKWARD] START\n";
+
     if (grad_fn_ == nullptr) {
 
         throw std::runtime_error(
             "Cannot call backward on tensor without grad_fn"
         );
     }
+
+    std::cerr << "[TENSOR BACKWARD] grad_fn exists\n";
 
     // ========================================
     // Build backward graph
@@ -640,56 +644,37 @@ void Tensor::backward(const Tensor& grad_output) {
     std::vector<Tensor*> graph;
     std::unordered_set<Tensor*> visited;
 
-    auto graph_start =
-        std::chrono::steady_clock::now();
+    std::cerr
+        << "[TENSOR BACKWARD] BuildBackwardGraph START\n";
 
     BuildBackwardGraph(
         graph,
         visited
     );
 
-    // Добавляем начальный градиент
+    std::cerr
+        << "[TENSOR BACKWARD] BuildBackwardGraph OK"
+        << " | graph size = "
+        << graph.size()
+        << "\n";
+
+    // ========================================
+    // Initial gradient
+    // ========================================
+
+    std::cerr
+        << "[TENSOR BACKWARD] Add initial grad START\n";
+
     AddGrad(grad_output);
 
-    auto graph_end =
-        std::chrono::steady_clock::now();
-
-    double current_graph_time =
-        std::chrono::duration<double, std::milli>(
-            graph_end - graph_start
-        ).count();
-
-
-    // ========================================
-    // Operation profiling
-    // ========================================
-
-    std::unordered_map<std::string, double>
-        operation_times;
-
-    std::unordered_map<std::string, size_t>
-        operation_calls;
-
-
-    // ========================================
-    // Autograd overhead profiling
-    // ========================================
-
-    double operation_backward_time = 0.0;
-    double get_inputs_time = 0.0;
-    double add_grad_call_time = 0.0;
-
-    size_t get_inputs_calls = 0;
-    size_t add_grad_call_count = 0;
-
+    std::cerr
+        << "[TENSOR BACKWARD] Add initial grad OK\n";
 
     // ========================================
     // Backward pass
     // ========================================
 
-    auto backward_start =
-        std::chrono::steady_clock::now();
-
+    size_t operation_index = 0;
 
     for (auto it = graph.rbegin();
          it != graph.rend();
@@ -697,79 +682,170 @@ void Tensor::backward(const Tensor& grad_output) {
 
         Tensor* tensor = *it;
 
+        if (tensor == nullptr) {
+            std::cerr
+                << "[TENSOR BACKWARD] NULL tensor!\n";
+            continue;
+        }
+
         if (tensor->grad_fn_ == nullptr) {
             continue;
         }
 
+        std::cerr
+            << "\n[TENSOR BACKWARD] Operation #"
+            << operation_index
+            << "\n";
+
+        operation_index++;
 
         const char* operation_name =
             tensor->grad_fn_->Name();
 
+        std::cerr
+            << "  Operation: "
+            << operation_name
+            << "\n";
+
+        std::cerr
+            << "  Tensor shape: [";
+
+        for (size_t i = 0;
+             i < tensor->shape_.size();
+             ++i) {
+
+            if (i > 0) {
+                std::cerr << ", ";
+            }
+
+            std::cerr
+                << tensor->shape_[i];
+        }
+
+        std::cerr << "]\n";
+
+        std::cerr
+            << "  Tensor device: "
+            << (tensor->device_ == Device::CUDA
+                ? "CUDA"
+                : "CPU")
+            << "\n";
 
         // ====================================
-        // Operation::backward()
+        // Проверяем gradient
         // ====================================
 
-        auto operation_start =
-            std::chrono::steady_clock::now();
+        if (tensor->grad_ == nullptr) {
 
+            std::cerr
+                << "  ERROR: tensor->grad_ == nullptr\n";
+
+            throw std::runtime_error(
+                std::string(
+                    "Tensor::backward: missing gradient for operation "
+                ) + operation_name
+            );
+        }
+
+        std::cerr
+            << "  Gradient shape: [";
+
+        for (size_t i = 0;
+             i < tensor->grad_->GetShape().size();
+             ++i) {
+
+            if (i > 0) {
+                std::cerr << ", ";
+            }
+
+            std::cerr
+                << tensor->grad_->GetShape()[i];
+        }
+
+        std::cerr << "]\n";
+
+        std::cerr
+            << "  Gradient device: "
+            << (tensor->grad_->GetDevice() == Device::CUDA
+                ? "CUDA"
+                : "CPU")
+            << "\n";
+
+        // ====================================
+        // Get inputs
+        // ====================================
+
+        std::cerr
+            << "  GetInputs START\n";
+
+        std::vector<std::shared_ptr<Tensor>> inputs =
+            tensor->grad_fn_->GetInputs();
+
+        std::cerr
+            << "  GetInputs OK"
+            << " | inputs = "
+            << inputs.size()
+            << "\n";
+
+        for (size_t i = 0;
+             i < inputs.size();
+             ++i) {
+
+            if (inputs[i] == nullptr) {
+
+                std::cerr
+                    << "    input["
+                    << i
+                    << "] = nullptr\n";
+
+                continue;
+            }
+
+            std::cerr
+                << "    input["
+                << i
+                << "] shape = [";
+
+            for (size_t j = 0;
+                 j < inputs[i]->GetShape().size();
+                 ++j) {
+
+                if (j > 0) {
+                    std::cerr << ", ";
+                }
+
+                std::cerr
+                    << inputs[i]->GetShape()[j];
+            }
+
+            std::cerr
+                << "] device = "
+                << (inputs[i]->GetDevice() == Device::CUDA
+                    ? "CUDA"
+                    : "CPU")
+                << "\n";
+        }
+
+        // ====================================
+        // Operation backward
+        // ====================================
+
+        std::cerr
+            << "  Operation::backward START\n";
 
         std::vector<Tensor> gradients =
             tensor->grad_fn_->backward(
                 *tensor->grad_
             );
 
-
-        auto operation_end =
-            std::chrono::steady_clock::now();
-
-
-        double operation_time =
-            std::chrono::duration<double, std::milli>(
-                operation_end - operation_start
-            ).count();
-
-
-        operation_backward_time +=
-            operation_time;
-
-
-        operation_times[operation_name] +=
-            operation_time;
-
-        operation_calls[operation_name]++;
-
+        std::cerr
+            << "  Operation::backward OK"
+            << " | gradients = "
+            << gradients.size()
+            << "\n";
 
         // ====================================
-        // GetInputs()
-        // ====================================
-
-        auto inputs_start =
-            std::chrono::steady_clock::now();
-
-
-        std::vector<std::shared_ptr<Tensor>> inputs =
-            tensor->grad_fn_->GetInputs();
-
-
-        auto inputs_end =
-            std::chrono::steady_clock::now();
-
-
-        double inputs_time =
-            std::chrono::duration<double, std::milli>(
-                inputs_end - inputs_start
-            ).count();
-
-
-        get_inputs_time +=
-            inputs_time;
-
-        get_inputs_calls++;
-
-
-        // ====================================
-        // Проверка количества градиентов
+        // Проверка количества
         // ====================================
 
         if (gradients.size() != inputs.size()) {
@@ -779,7 +855,6 @@ void Tensor::backward(const Tensor& grad_output) {
                 "number of inputs"
             );
         }
-
 
         // ====================================
         // Передаём градиенты входам
@@ -793,42 +868,29 @@ void Tensor::backward(const Tensor& grad_output) {
                 continue;
             }
 
-
-            auto add_start =
-                std::chrono::steady_clock::now();
-
+            std::cerr
+                << "    AddGrad input["
+                << i
+                << "] START\n";
 
             inputs[i]->AddGrad(
                 gradients[i]
             );
 
-
-            auto add_end =
-                std::chrono::steady_clock::now();
-
-
-            double add_time =
-                std::chrono::duration<double, std::milli>(
-                    add_end - add_start
-                ).count();
-
-
-            add_grad_call_time +=
-                add_time;
-
-            add_grad_call_count++;
+            std::cerr
+                << "    AddGrad input["
+                << i
+                << "] OK\n";
         }
+
+        std::cerr
+            << "  Operation #"
+            << (operation_index - 1)
+            << " FINISHED\n";
     }
 
-
-    auto backward_end =
-        std::chrono::steady_clock::now();
-
-
-    double current_backward_time =
-        std::chrono::duration<double, std::milli>(
-            backward_end - backward_start
-        ).count();
+    std::cerr
+        << "\n[TENSOR BACKWARD] FINISHED\n";
 }
 
 Tensor Tensor::SumAxis(int axis) const {
