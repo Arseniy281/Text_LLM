@@ -41,7 +41,7 @@ public:
     explicit Tensor(std::vector<size_t> shape);
     Tensor(std::vector<size_t> shape, float k);
     explicit Tensor(std::vector<size_t> shape, UninitializedTag);
-    static Tensor Random(std::vector<size_t> shape, float min = 0.0f, float max = 1.0f);
+    static Tensor Random(std::vector<size_t> shape, float min = 0.0f, float max = 1.0f, Device device = Device::CPU);
     Tensor(std::vector<size_t> shape, std::vector<float> data);
     Tensor(std::vector<size_t> shape, float k, Device device);
     Tensor(std::vector<size_t> shape, Device device);

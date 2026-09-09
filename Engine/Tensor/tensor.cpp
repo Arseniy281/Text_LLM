@@ -1,7 +1,9 @@
 #include "tensor.h"
 #include "device.h"
 
+#ifdef __CUDACC__
 #include <cuda_runtime.h>
+#endif
 
 #include <fstream>
 #include <sstream>
@@ -194,18 +196,29 @@ Tensor::Tensor(std::vector<size_t> shape, UninitializedTag)
     Allocate();
 }
 
-Tensor Tensor::Random(
-    std::vector<size_t> shape,
-    float min,
-    float max
-) {
-    Tensor result(shape);
+Tensor Tensor::Random(std::vector<size_t> shape, float min, float max, Device device) {
+    Tensor result(shape, UninitializedTag{});
 
     static std::mt19937 gen(42);
     std::uniform_real_distribution<float> dist(min, max);
 
+    std::vector<float> data(result.size_);
+
     for (size_t i = 0; i < result.size_; i++) {
-        result.data_[i] = dist(gen);
+        data[i] = dist(gen);
+    }
+
+    if (device == Device::CPU) {
+        for (size_t i = 0; i < result.size_; i++) {
+            result.data_[i] = data[i];
+        }
+    } else {
+        cudaMemcpy(
+            result.data_,
+            data.data(),
+            result.size_ * sizeof(float),
+            cudaMemcpyHostToDevice
+        );
     }
 
     return result;
