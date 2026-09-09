@@ -324,7 +324,7 @@ int main() {
 
     std::cout << "\nRunning model backward...\n";
 
-    logits0->backward();
+    logits0->backward(loss_grad);
 
     cudaDeviceSynchronize();
 
