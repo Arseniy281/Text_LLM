@@ -528,13 +528,28 @@ void Tensor::SetGrad(std::shared_ptr<Tensor> grad) {
 
 void Tensor::AddGrad(Tensor grad) {
 
+    std::cerr << "\nAddGrad\n";
+
+    std::cerr << "current grad: ";
+
     if (grad_ == nullptr) {
+        std::cerr << "nullptr";
+    } else {
+        for (size_t x : grad_->GetShape()) {
+            std::cerr << x << " ";
+        }
+    }
 
-        grad_ =
-            std::make_shared<Tensor>(
-                std::move(grad)
-            );
+    std::cerr << "\nincoming grad: ";
 
+    for (size_t x : grad.GetShape()) {
+        std::cerr << x << " ";
+    }
+
+    std::cerr << "\n";
+
+    if (grad_ == nullptr) {
+        grad_ = std::make_shared<Tensor>(std::move(grad));
         return;
     }
 
@@ -544,20 +559,7 @@ void Tensor::AddGrad(Tensor grad) {
         );
     }
 
-    auto start =
-        std::chrono::steady_clock::now();
-
     *grad_ += grad;
-
-    auto end =
-        std::chrono::steady_clock::now();
-
-    add_grad_time +=
-        std::chrono::duration<double, std::milli>(
-            end - start
-        ).count();
-
-    add_grad_calls++;
 }
 
 void Tensor::ClearGrad() {
