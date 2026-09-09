@@ -721,3 +721,30 @@ size_t Tensor::Numel() const {
 Device Tensor::GetDevice() const {
     return device_;
 }
+
+void Tensor::CopyToCUDA(Tensor& destination) const {
+    if (device_ != Device::CPU) {
+        throw std::runtime_error(
+            "CopyToCUDA: source must be CPU"
+        );
+    }
+
+    if (destination.device_ != Device::CUDA) {
+        throw std::runtime_error(
+            "CopyToCUDA: destination must be CUDA"
+        );
+    }
+
+    if (size_ != destination.size_) {
+        throw std::runtime_error(
+            "CopyToCUDA: size mismatch"
+        );
+    }
+
+    cudaMemcpy(
+        destination.data_,
+        data_,
+        size_ * sizeof(float),
+        cudaMemcpyHostToDevice
+    );
+}

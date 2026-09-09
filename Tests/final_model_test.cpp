@@ -26,9 +26,6 @@ const size_t HEADS = 2;
 const size_t HIDDEN = 64;
 
 const size_t CONTEXT = 32;
-
-// Пока batch = 1.
-// Каждый шаг берёт новое случайное место в книге.
 const size_t STEPS = 5000;
 
 const float LR = 0.001f;
@@ -47,6 +44,20 @@ float GetScalar(const Tensor& tensor) {
         );
     }
 
+    Tensor cpu_tensor(
+        tensor.GetShape(),
+        Device::CPU
+    );
+
+    cudaMemcpy(
+        cpu_tensor.at(0) == cpu_tensor.at(0)
+            ? nullptr
+            : nullptr,
+        nullptr,
+        0,
+        cudaMemcpyDeviceToHost
+    );
+
     return tensor.at(0);
 }
 
@@ -56,9 +67,12 @@ float GetScalar(const Tensor& tensor) {
 
 int main() {
     try {
-        std::cout << "========================================\n";
-        std::cout << "     RANDOM WINDOW CUDA MODEL TEST\n";
-        std::cout << "========================================\n\n";
+        std::cout
+            << "========================================\n";
+        std::cout
+            << "     RANDOM WINDOW CUDA MODEL TEST\n";
+        std::cout
+            << "========================================\n\n";
 
         // ----------------------------------------------------
         // CUDA
@@ -96,10 +110,8 @@ int main() {
         // ----------------------------------------------------
 
         std::cout
-            << "========================================\n";
-        std::cout
-            << "          LOADING TEXT\n";
-        std::cout
+            << "========================================\n"
+            << "          LOADING TEXT\n"
             << "========================================\n";
 
         std::ifstream file(DATA_PATH);
@@ -125,10 +137,8 @@ int main() {
         // ----------------------------------------------------
 
         std::cout
-            << "========================================\n";
-        std::cout
-            << "           TOKENIZATION\n";
-        std::cout
+            << "========================================\n"
+            << "           TOKENIZATION\n"
             << "========================================\n";
 
         BPETokenizer tokenizer;
@@ -165,10 +175,8 @@ int main() {
         // ----------------------------------------------------
 
         std::cout
-            << "========================================\n";
-        std::cout
-            << "             MODEL\n";
-        std::cout
+            << "========================================\n"
+            << "             MODEL\n"
             << "========================================\n";
 
         LanguageModel model(
@@ -180,7 +188,6 @@ int main() {
             Device::CUDA
         );
 
-        // KV-cache во время обучения не нужен.
         model.SetUseKVCache(false);
 
         CrossEntropyLoss loss;
@@ -237,25 +244,12 @@ int main() {
         );
 
         // ----------------------------------------------------
-        // Initial statistics
-        // ----------------------------------------------------
-
-        std::cout
-            << "========================================\n";
-        std::cout
-            << "            INITIAL STATE\n";
-        std::cout
-            << "========================================\n";
-
-        // ----------------------------------------------------
         // Training
         // ----------------------------------------------------
 
         std::cout
-            << "\n========================================\n";
-        std::cout
-            << "             TRAINING\n";
-        std::cout
+            << "========================================\n"
+            << "             TRAINING\n"
             << "========================================\n\n";
 
         float initial_loss = -1.0f;
@@ -266,26 +260,45 @@ int main() {
         for (size_t step = 0; step < STEPS; ++step) {
 
             // ------------------------------------------------
-            // Выбираем случайное место во всей книге
+            // Random window
             // ------------------------------------------------
 
-            size_t start = distribution(generator);
+            size_t start =
+                distribution(generator);
 
-            std::vector<size_t> input_tokens(
+            std::vector<float> input_data(
                 CONTEXT
             );
 
-            std::vector<size_t> target_tokens(
+            std::vector<float> target_data(
                 CONTEXT
             );
 
             for (size_t i = 0; i < CONTEXT; ++i) {
-                input_tokens[i] =
-                    tokens[start + i];
+                input_data[i] =
+                    static_cast<float>(
+                        tokens[start + i]
+                    );
 
-                target_tokens[i] =
-                    tokens[start + i + 1];
+                target_data[i] =
+                    static_cast<float>(
+                        tokens[start + i + 1]
+                    );
             }
+
+            // ------------------------------------------------
+            // CPU tensors
+            // ------------------------------------------------
+
+            Tensor input_cpu(
+                {CONTEXT},
+                std::move(input_data)
+            );
+
+            Tensor target_cpu(
+                {1, CONTEXT},
+                std::move(target_data)
+            );
 
             // ------------------------------------------------
             // CUDA tensors
@@ -301,19 +314,8 @@ int main() {
                 Device::CUDA
             );
 
-            // Записываем токены.
-            // Сейчас это batch = 1.
-            for (size_t i = 0; i < CONTEXT; ++i) {
-                input.at(i) =
-                    static_cast<float>(
-                        input_tokens[i]
-                    );
-
-                target.at(i) =
-                    static_cast<float>(
-                        target_tokens[i]
-                    );
-            }
+            input_cpu.CopyToCUDA(input);
+            target_cpu.CopyToCUDA(target);
 
             // ------------------------------------------------
             // Forward
@@ -360,11 +362,15 @@ int main() {
             // ------------------------------------------------
 
             if (step == 0) {
-                initial_loss = loss_value;
+                initial_loss =
+                    loss_value;
             }
 
-            last_loss = loss_value;
-            loss_sum += loss_value;
+            last_loss =
+                loss_value;
+
+            loss_sum +=
+                loss_value;
 
             // ------------------------------------------------
             // Logging
@@ -375,7 +381,9 @@ int main() {
 
                 double average_loss =
                     loss_sum /
-                    static_cast<double>(step + 1);
+                    static_cast<double>(
+                        step + 1
+                    );
 
                 std::cout
                     << "Step "
@@ -394,25 +402,12 @@ int main() {
         }
 
         // ----------------------------------------------------
-        // Final state
-        // ----------------------------------------------------
-
-        std::cout
-            << "\n========================================\n";
-        std::cout
-            << "             FINAL STATE\n";
-        std::cout
-            << "========================================\n";
-
-        // ----------------------------------------------------
         // Result
         // ----------------------------------------------------
 
         std::cout
-            << "\n========================================\n";
-        std::cout
-            << "               RESULT\n";
-        std::cout
+            << "\n========================================\n"
+            << "               RESULT\n"
             << "========================================\n";
 
         std::cout
@@ -448,10 +443,8 @@ int main() {
         }
 
         std::cout
-            << "\n========================================\n";
-        std::cout
-            << " RANDOM WINDOW TRAINING FINISHED\n";
-        std::cout
+            << "\n========================================\n"
+            << " RANDOM WINDOW TRAINING FINISHED\n"
             << "========================================\n";
 
         return 0;

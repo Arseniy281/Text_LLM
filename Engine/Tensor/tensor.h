@@ -121,6 +121,8 @@ public:
 
     size_t Numel() const;
     Device GetDevice() const;
+
+    void CopyToCUDA(Tensor& destination) const;
 };
 
 Tensor operator/(float scalar, const Tensor& t);
