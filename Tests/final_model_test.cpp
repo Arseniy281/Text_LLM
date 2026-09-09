@@ -1,3 +1,9 @@
+#include <chrono>
+#include <iomanip>
+#ifdef __CUDACC__
+#include <cuda_runtime.h>
+#endif
+
 #include "../Engine/Layers/language_model.h"
 #include "../Engine/Tokenizer/bpe_tokenizer.h"
 #include "../Engine/Tensor/tensor.h"
