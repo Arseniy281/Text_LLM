@@ -1,18 +1,20 @@
 #include "../Engine/Layers/language_model.h"
 #include "../Engine/Layers/ce_loss.h"
+#include "../Engine/Tokenizer/bpe_tokenizer.h"
 #include "../Engine/Tensor/tensor.h"
 #include "../Engine/Tensor/device.h"
-#include <iomanip>
 
 #include <cuda_runtime.h>
 
 #include <iostream>
 #include <vector>
+#include <string>
+#include <memory>
+#include <fstream>
+#include <iomanip>
 #include <cmath>
 #include <limits>
 #include <algorithm>
-#include <memory>
-#include <string>
 
 // ============================================================
 // CUDA helpers
@@ -49,28 +51,28 @@ void CopyToCUDA(
     }
 }
 
-std::vector<float> CopyFromCUDA(
-    const Tensor& tensor
-) {
-    std::vector<float> data(
-        tensor.GetSize()
-    );
+// ============================================================
+// CUDA synchronization
+// ============================================================
 
-    cudaError_t error = cudaMemcpy(
-        data.data(),
-        tensor.Data(),
-        tensor.GetSize() * sizeof(float),
-        cudaMemcpyDeviceToHost
-    );
+void CheckCUDA() {
+    cudaError_t error = cudaGetLastError();
 
     if (error != cudaSuccess) {
         throw std::runtime_error(
-            std::string("CopyFromCUDA failed: ") +
+            std::string("CUDA error: ") +
             cudaGetErrorString(error)
         );
     }
 
-    return data;
+    error = cudaDeviceSynchronize();
+
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string("CUDA sync error: ") +
+            cudaGetErrorString(error)
+        );
+    }
 }
 
 // ============================================================
@@ -92,13 +94,27 @@ struct TensorStats {
 TensorStats GetTensorStats(
     const Tensor& tensor
 ) {
-    std::vector<float> data;
+    std::vector<float> data(
+        tensor.GetSize()
+    );
 
     if (tensor.GetDevice() == Device::CUDA) {
-        cudaDeviceSynchronize();
-        data = CopyFromCUDA(tensor);
+
+        cudaError_t error = cudaMemcpy(
+            data.data(),
+            tensor.Data(),
+            tensor.GetSize() * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+        if (error != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("GetTensorStats CUDA copy failed: ") +
+                cudaGetErrorString(error)
+            );
+        }
+
     } else {
-        data.resize(tensor.GetSize());
 
         for (size_t i = 0;
              i < tensor.GetSize();
@@ -169,10 +185,7 @@ void PrintTensorStats(
 
     std::cout
         << name
-        << ": ";
-
-    std::cout
-        << "shape ";
+        << ": shape ";
 
     for (size_t x : tensor.GetShape()) {
         std::cout << x << " ";
@@ -182,28 +195,34 @@ void PrintTensorStats(
         << " | "
         << (tensor.GetDevice() == Device::CUDA
                 ? "CUDA"
-                : "CPU");
+                : "CPU")
 
-    std::cout
         << " | min "
         << stats.min
+
         << " max "
         << stats.max
+
         << " mean "
         << stats.mean
+
         << " norm "
         << stats.norm
+
         << " | NaN "
         << stats.nan_count
+
         << " Inf "
         << stats.inf_count
+
         << " zeros "
         << stats.zero_count
+
         << "\n";
 }
 
 // ============================================================
-// Loss extraction
+// Scalar
 // ============================================================
 
 float GetScalar(
@@ -216,10 +235,24 @@ float GetScalar(
     }
 
     if (tensor.GetDevice() == Device::CUDA) {
-        std::vector<float> data =
-            CopyFromCUDA(tensor);
 
-        return data[0];
+        float value = 0.0f;
+
+        cudaError_t error = cudaMemcpy(
+            &value,
+            tensor.Data(),
+            sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+        if (error != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("GetScalar failed: ") +
+                cudaGetErrorString(error)
+            );
+        }
+
+        return value;
     }
 
     return tensor.at(0);
@@ -255,528 +288,803 @@ float MaxDifference(
 }
 
 // ============================================================
+// Read text
+// ============================================================
+
+std::string ReadFile(
+    const std::string& path
+) {
+    std::ifstream file(path);
+
+    if (!file) {
+        throw std::runtime_error(
+            "Cannot open file: " + path
+        );
+    }
+
+    std::string text(
+        (std::istreambuf_iterator<char>(file)),
+        std::istreambuf_iterator<char>()
+    );
+
+    return text;
+}
+
+// ============================================================
 // Main
 // ============================================================
 
 int main() {
 
-    std::cout
-        << "========================================\n"
-        << "          CUDA MODEL TEST\n"
-        << "========================================\n";
-
-    // ========================================================
-    // Model configuration
-    // ========================================================
-
-    const size_t VOCAB_SIZE = 1000;
-
-    const size_t EMBED_DIM = 32;
-
-    const size_t BLOCKS = 2;
-
-    const size_t HEADS = 2;
-
-    const size_t HIDDEN = 64;
-
-    const size_t CONTEXT = 32;
-
-    const size_t STEPS = 1000;
-
-    const float LR = 0.001f;
-
-    // ========================================================
-    // Model
-    // ========================================================
-
-    LanguageModel model(
-        VOCAB_SIZE,
-        EMBED_DIM,
-        BLOCKS,
-        HEADS,
-        HIDDEN,
-        Device::CUDA
-    );
-
-    CrossEntropyLoss loss;
-
-    // ========================================================
-    // Dataset
-    // ========================================================
-
-    std::vector<size_t> input_tokens;
-
-    std::vector<size_t> target_tokens;
-
-    for (size_t i = 0;
-         i < CONTEXT;
-         ++i) {
-
-        input_tokens.push_back(
-            100 + (i % 20)
-        );
-
-        target_tokens.push_back(
-            100 + ((i + 1) % 20)
-        );
-    }
-
-    Tensor input(
-        {input_tokens.size()},
-        Device::CUDA
-    );
-
-    Tensor targets(
-        {1, target_tokens.size()},
-        Device::CUDA
-    );
-
-    std::vector<float> input_host(
-        input_tokens.size()
-    );
-
-    std::vector<float> target_host(
-        target_tokens.size()
-    );
-
-    for (size_t i = 0;
-         i < input_tokens.size();
-         ++i) {
-
-        input_host[i] =
-            static_cast<float>(
-                input_tokens[i]
-            );
-    }
-
-    for (size_t i = 0;
-         i < target_tokens.size();
-         ++i) {
-
-        target_host[i] =
-            static_cast<float>(
-                target_tokens[i]
-            );
-    }
-
-    CopyToCUDA(
-        input,
-        input_host
-    );
-
-    CopyToCUDA(
-        targets,
-        target_host
-    );
-
-    auto input_ptr =
-        std::make_shared<Tensor>(
-            std::move(input)
-        );
-
-    // ========================================================
-    // Initial parameters
-    // ========================================================
-
-    std::cout
-        << "\n========================================\n"
-        << "       INITIAL PARAMETERS\n"
-        << "========================================\n";
-
-    PrintTensorStats(
-        "LM head weights",
-        model.GetLMHeadWeights()
-    );
-
-    PrintTensorStats(
-        "LM head bias",
-        model.GetLMHeadBias()
-    );
-
-    PrintTensorStats(
-        "Embeddings",
-        model.GetEmbeddings()
-    );
-
-    // ========================================================
-    // Initial forward
-    // ========================================================
-
-    model.ClearGrad();
-
-    cudaDeviceSynchronize();
-
-    auto logits =
-        model.forward(input_ptr);
-
-    cudaDeviceSynchronize();
-
-    PrintTensorStats(
-        "Initial logits",
-        *logits
-    );
-
-    Tensor initial_loss =
-        loss.forward(
-            *logits,
-            targets
-        );
-
-    cudaDeviceSynchronize();
-
-    float first_loss =
-        GetScalar(initial_loss);
-
-    std::cout
-        << "\nInitial loss: "
-        << first_loss
-        << "\n";
-
-    if (!std::isfinite(first_loss)) {
+    try {
 
         std::cout
-            << "[FAIL] Initial loss is not finite\n";
+            << "========================================\n"
+            << "       REAL TEXT CUDA MODEL TEST\n"
+            << "========================================\n";
 
-        return 1;
-    }
+        // ====================================================
+        // Configuration
+        // ====================================================
 
-    // ========================================================
-    // Save initial LM head weights
-    // ========================================================
+        const size_t VOCAB_SIZE = 1000;
 
-    std::vector<float> initial_weights =
-        CopyFromCUDA(
-            model.GetLMHeadWeights()
-        );
+        const size_t EMBED_DIM = 32;
 
-    std::vector<float> initial_bias =
-        CopyFromCUDA(
-            model.GetLMHeadBias()
-        );
+        const size_t BLOCKS = 2;
 
-    // ========================================================
-    // Training
-    // ========================================================
+        const size_t HEADS = 2;
 
-    std::cout
-        << "\n========================================\n"
-        << "             TRAINING\n"
-        << "========================================\n";
+        const size_t HIDDEN = 64;
 
-    float last_loss = first_loss;
+        const size_t CONTEXT = 32;
 
-    bool embedding_gradient_seen = false;
+        const size_t STEPS = 1000;
 
-    bool transformer_gradient_seen = false;
+        const float LR = 0.001f;
 
-    bool lm_gradient_seen = false;
+        const std::string DATA_PATH =
+            "../Data/master_and_margarita.txt";
 
-    for (size_t step = 0;
-         step < STEPS;
-         ++step) {
+        // ====================================================
+        // CUDA device
+        // ====================================================
 
-        model.ClearGrad();
+        int device_count = 0;
 
-        cudaDeviceSynchronize();
+        cudaGetDeviceCount(&device_count);
 
-        auto current_logits =
-            model.forward(input_ptr);
-
-        cudaDeviceSynchronize();
-
-        Tensor current_loss =
-            loss.forward(
-                *current_logits,
-                targets
-            );
-
-        cudaDeviceSynchronize();
-
-        float loss_value =
-            GetScalar(current_loss);
-
-        if (!std::isfinite(loss_value)) {
+        if (device_count == 0) {
 
             std::cout
-                << "\n[FAIL] Loss became non-finite "
-                << "at step "
-                << step
-                << "\n";
+                << "[FAIL] CUDA device not found\n";
 
             return 1;
         }
 
-        // ----------------------------------------------------
-        // Backward
-        // ----------------------------------------------------
+        std::cout
+            << "CUDA devices: "
+            << device_count
+            << "\n";
 
-        Tensor loss_grad =
-            loss.backward();
+        cudaDeviceProp properties;
 
-        cudaDeviceSynchronize();
-
-        current_logits->backward(
-            loss_grad
+        cudaGetDeviceProperties(
+            &properties,
+            0
         );
 
-        cudaDeviceSynchronize();
+        std::cout
+            << "GPU: "
+            << properties.name
+            << "\n";
 
-        // ----------------------------------------------------
-        // Check LM head gradient
-        // ----------------------------------------------------
+        // ====================================================
+        // Load text
+        // ====================================================
 
-        const Tensor& lm_weights =
-            model.GetLMHeadWeights();
+        std::cout
+            << "\n========================================\n"
+            << "          LOADING TEXT\n"
+            << "========================================\n";
 
-        if (lm_weights.Grad() != nullptr) {
+        std::string text =
+            ReadFile(DATA_PATH);
 
-            TensorStats stats =
-                GetTensorStats(
-                    *lm_weights.Grad()
-                );
+        std::cout
+            << "Text size: "
+            << text.size()
+            << " characters\n";
 
-            if (stats.norm > 0.0 &&
-                stats.nan_count == 0 &&
-                stats.inf_count == 0) {
-
-                lm_gradient_seen = true;
-            }
-        }
-
-        // ----------------------------------------------------
-        // Check embedding gradient
-        // ----------------------------------------------------
-
-        auto embedding_grad =
-            model.GetEmbeddingGrad();
-
-        if (embedding_grad != nullptr) {
-
-            TensorStats stats =
-                GetTensorStats(
-                    *embedding_grad
-                );
-
-            if (stats.norm > 0.0 &&
-                stats.nan_count == 0 &&
-                stats.inf_count == 0) {
-
-                embedding_gradient_seen = true;
-            }
-        }
-
-        // ----------------------------------------------------
-        // Update
-        // ----------------------------------------------------
-
-        model.Update(LR);
-
-        cudaDeviceSynchronize();
-
-        // ----------------------------------------------------
-        // Logging
-        // ----------------------------------------------------
-
-        if (step % 100 == 0 ||
-            step == STEPS - 1) {
+        if (text.empty()) {
 
             std::cout
-                << "Step "
-                << std::setw(4)
-                << step
-                << " | Loss: "
-                << std::fixed
-                << std::setprecision(6)
-                << loss_value
+                << "[FAIL] Text is empty\n";
+
+            return 1;
+        }
+
+        // ====================================================
+        // Tokenizer
+        // ====================================================
+
+        std::cout
+            << "\n========================================\n"
+            << "           TOKENIZATION\n"
+            << "========================================\n";
+
+        BPETokenizer tokenizer(
+            VOCAB_SIZE
+        );
+
+        tokenizer.Train(text);
+
+        std::vector<size_t> tokens =
+            tokenizer.Encode(text);
+
+        std::cout
+            << "Tokens: "
+            << tokens.size()
+            << "\n";
+
+        if (tokens.size() <= CONTEXT) {
+
+            std::cout
+                << "[FAIL] Not enough tokens\n";
+
+            return 1;
+        }
+
+        // ====================================================
+        // Check token range
+        // ====================================================
+
+        size_t min_token =
+            std::numeric_limits<size_t>::max();
+
+        size_t max_token = 0;
+
+        for (size_t token : tokens) {
+
+            min_token =
+                std::min(
+                    min_token,
+                    token
+                );
+
+            max_token =
+                std::max(
+                    max_token,
+                    token
+                );
+        }
+
+        std::cout
+            << "Token range: "
+            << min_token
+            << " - "
+            << max_token
+            << "\n";
+
+        if (max_token >= VOCAB_SIZE) {
+
+            std::cout
+                << "[FAIL] Token exceeds vocabulary\n";
+
+            return 1;
+        }
+
+        // ====================================================
+        // Model
+        // ====================================================
+
+        std::cout
+            << "\n========================================\n"
+            << "             MODEL\n"
+            << "========================================\n";
+
+        LanguageModel model(
+            VOCAB_SIZE,
+            EMBED_DIM,
+            BLOCKS,
+            HEADS,
+            HIDDEN,
+            Device::CUDA
+        );
+
+        // На обучении KV cache не нужен.
+        model.SetUseKVCache(false);
+
+        CrossEntropyLoss loss;
+
+        // ====================================================
+        // Dataset
+        // ====================================================
+
+        std::vector<size_t> input_tokens(
+            CONTEXT
+        );
+
+        std::vector<size_t> target_tokens(
+            CONTEXT
+        );
+
+        /*
+         * Берём начало реального текста.
+         *
+         * x: token[i]
+         * y: token[i + 1]
+         */
+
+        for (size_t i = 0;
+             i < CONTEXT;
+             ++i) {
+
+            input_tokens[i] =
+                tokens[i];
+
+            target_tokens[i] =
+                tokens[i + 1];
+        }
+
+        Tensor input(
+            {CONTEXT},
+            Device::CUDA
+        );
+
+        Tensor targets(
+            {1, CONTEXT},
+            Device::CUDA
+        );
+
+        std::vector<float> input_host(
+            CONTEXT
+        );
+
+        std::vector<float> target_host(
+            CONTEXT
+        );
+
+        for (size_t i = 0;
+             i < CONTEXT;
+             ++i) {
+
+            input_host[i] =
+                static_cast<float>(
+                    input_tokens[i]
+                );
+
+            target_host[i] =
+                static_cast<float>(
+                    target_tokens[i]
+                );
+        }
+
+        CopyToCUDA(
+            input,
+            input_host
+        );
+
+        CopyToCUDA(
+            targets,
+            target_host
+        );
+
+        auto input_ptr =
+            std::make_shared<Tensor>(
+                std::move(input)
+            );
+
+        // ====================================================
+        // Print sample
+        // ====================================================
+
+        std::cout
+            << "\nTraining tokens:\n";
+
+        for (size_t i = 0;
+             i < CONTEXT;
+             ++i) {
+
+            std::cout
+                << input_tokens[i]
+                << " -> "
+                << target_tokens[i]
                 << "\n";
         }
 
-        last_loss = loss_value;
-    }
+        // ====================================================
+        // Initial parameters
+        // ====================================================
 
-    // ========================================================
-    // Final parameters
-    // ========================================================
+        std::cout
+            << "\n========================================\n"
+            << "       INITIAL PARAMETERS\n"
+            << "========================================\n";
 
-    std::cout
-        << "\n========================================\n"
-        << "        FINAL PARAMETERS\n"
-        << "========================================\n";
-
-    PrintTensorStats(
-        "LM head weights AFTER",
-        model.GetLMHeadWeights()
-    );
-
-    PrintTensorStats(
-        "LM head bias AFTER",
-        model.GetLMHeadBias()
-    );
-
-    PrintTensorStats(
-        "Embeddings AFTER",
-        model.GetEmbeddings()
-    );
-
-    // ========================================================
-    // Parameter change
-    // ========================================================
-
-    std::vector<float> final_weights =
-        CopyFromCUDA(
+        PrintTensorStats(
+            "LM head weights",
             model.GetLMHeadWeights()
         );
 
-    std::vector<float> final_bias =
-        CopyFromCUDA(
+        PrintTensorStats(
+            "LM head bias",
             model.GetLMHeadBias()
         );
 
-    float weight_change =
-        MaxDifference(
-            initial_weights,
-            final_weights
+        PrintTensorStats(
+            "Embeddings",
+            model.GetEmbeddings()
         );
 
-    float bias_change =
-        MaxDifference(
-            initial_bias,
-            final_bias
+        // ====================================================
+        // Initial forward
+        // ====================================================
+
+        model.ClearGrad();
+
+        auto logits =
+            model.forward(input_ptr);
+
+        CheckCUDA();
+
+        PrintTensorStats(
+            "Initial logits",
+            *logits
         );
 
-    // ========================================================
-    // Final forward
-    // ========================================================
+        Tensor initial_loss =
+            loss.forward(
+                *logits,
+                targets
+            );
 
-    model.ClearGrad();
+        CheckCUDA();
 
-    auto final_logits =
-        model.forward(input_ptr);
+        float first_loss =
+            GetScalar(initial_loss);
 
-    cudaDeviceSynchronize();
+        std::cout
+            << "\nInitial loss: "
+            << first_loss
+            << "\n";
 
-    Tensor final_loss =
-        loss.forward(
-            *final_logits,
-            targets
+        if (!std::isfinite(first_loss)) {
+
+            std::cout
+                << "[FAIL] Initial loss is not finite\n";
+
+            return 1;
+        }
+
+        // ====================================================
+        // Save initial parameters
+        // ====================================================
+
+        std::vector<float> initial_weights =
+            GetTensorStats(
+                model.GetLMHeadWeights()
+            ).norm > -1
+                ? std::vector<float>()
+                : std::vector<float>();
+
+        /*
+         * Копируем веса отдельно.
+         */
+
+        initial_weights.resize(
+            model.GetLMHeadWeights().GetSize()
         );
 
-    cudaDeviceSynchronize();
+        cudaMemcpy(
+            initial_weights.data(),
+            model.GetLMHeadWeights().Data(),
+            initial_weights.size() * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
 
-    float final_loss_value =
-        GetScalar(final_loss);
+        std::vector<float> initial_bias(
+            model.GetLMHeadBias().GetSize()
+        );
 
-    // ========================================================
-    // Result
-    // ========================================================
+        cudaMemcpy(
+            initial_bias.data(),
+            model.GetLMHeadBias().Data(),
+            initial_bias.size() * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
 
-    std::cout
-        << "\n========================================\n"
-        << "               RESULT\n"
-        << "========================================\n";
+        std::vector<float> initial_embeddings(
+            model.GetEmbeddings().GetSize()
+        );
 
-    std::cout
-        << "Initial loss: "
-        << first_loss
-        << "\n";
+        cudaMemcpy(
+            initial_embeddings.data(),
+            model.GetEmbeddings().Data(),
+            initial_embeddings.size() * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
 
-    std::cout
-        << "Final loss:   "
-        << final_loss_value
-        << "\n";
-
-    std::cout
-        << "Loss change:  "
-        << final_loss_value - first_loss
-        << "\n";
-
-    std::cout
-        << "LM weight change: "
-        << weight_change
-        << "\n";
-
-    std::cout
-        << "LM bias change:   "
-        << bias_change
-        << "\n";
-
-    std::cout
-        << "LM gradient:      "
-        << (lm_gradient_seen
-                ? "OK"
-                : "ZERO")
-        << "\n";
-
-    std::cout
-        << "Embedding gradient: "
-        << (embedding_gradient_seen
-                ? "OK"
-                : "ZERO")
-        << "\n";
-
-    // ========================================================
-    // Final validation
-    // ========================================================
-
-    bool success = true;
-
-    if (!std::isfinite(final_loss_value)) {
+        // ====================================================
+        // Training
+        // ====================================================
 
         std::cout
-            << "[FAIL] Final loss is not finite\n";
+            << "\n========================================\n"
+            << "             TRAINING\n"
+            << "========================================\n";
 
-        success = false;
+        bool lm_gradient_seen = false;
+
+        bool embedding_gradient_seen = false;
+
+        float last_loss = first_loss;
+
+        for (size_t step = 0;
+             step < STEPS;
+             ++step) {
+
+            model.ClearGrad();
+
+            auto current_logits =
+                model.forward(input_ptr);
+
+            CheckCUDA();
+
+            Tensor current_loss =
+                loss.forward(
+                    *current_logits,
+                    targets
+                );
+
+            CheckCUDA();
+
+            float loss_value =
+                GetScalar(current_loss);
+
+            if (!std::isfinite(loss_value)) {
+
+                std::cout
+                    << "\n[FAIL] Loss became non-finite "
+                    << "at step "
+                    << step
+                    << "\n";
+
+                return 1;
+            }
+
+            // ------------------------------------------------
+            // Backward
+            // ------------------------------------------------
+
+            Tensor loss_grad =
+                loss.backward();
+
+            CheckCUDA();
+
+            current_logits->backward(
+                loss_grad
+            );
+
+            CheckCUDA();
+
+            // ------------------------------------------------
+            // LM gradient
+            // ------------------------------------------------
+
+            const Tensor& lm_weights =
+                model.GetLMHeadWeights();
+
+            if (lm_weights.Grad() != nullptr) {
+
+                TensorStats stats =
+                    GetTensorStats(
+                        *lm_weights.Grad()
+                    );
+
+                if (stats.norm > 0.0 &&
+                    stats.nan_count == 0 &&
+                    stats.inf_count == 0) {
+
+                    lm_gradient_seen = true;
+                }
+            }
+
+            // ------------------------------------------------
+            // Embedding gradient
+            // ------------------------------------------------
+
+            auto embedding_grad =
+                model.GetEmbeddingGrad();
+
+            if (embedding_grad != nullptr) {
+
+                TensorStats stats =
+                    GetTensorStats(
+                        *embedding_grad
+                    );
+
+                if (stats.norm > 0.0 &&
+                    stats.nan_count == 0 &&
+                    stats.inf_count == 0) {
+
+                    embedding_gradient_seen = true;
+                }
+            }
+
+            // ------------------------------------------------
+            // Update
+            // ------------------------------------------------
+
+            model.Update(LR);
+
+            CheckCUDA();
+
+            // ------------------------------------------------
+            // Logging
+            // ------------------------------------------------
+
+            if (step % 100 == 0 ||
+                step == STEPS - 1) {
+
+                std::cout
+                    << "Step "
+                    << std::setw(4)
+                    << step
+                    << " | Loss: "
+                    << std::fixed
+                    << std::setprecision(6)
+                    << loss_value
+                    << "\n";
+            }
+
+            last_loss =
+                loss_value;
+        }
+
+        // ====================================================
+        // Final forward
+        // ====================================================
+
+        model.ClearGrad();
+
+        auto final_logits =
+            model.forward(input_ptr);
+
+        CheckCUDA();
+
+        Tensor final_loss =
+            loss.forward(
+                *final_logits,
+                targets
+            );
+
+        CheckCUDA();
+
+        float final_loss_value =
+            GetScalar(final_loss);
+
+        // ====================================================
+        // Final parameters
+        // ====================================================
+
+        std::cout
+            << "\n========================================\n"
+            << "        FINAL PARAMETERS\n"
+            << "========================================\n";
+
+        PrintTensorStats(
+            "LM head weights AFTER",
+            model.GetLMHeadWeights()
+        );
+
+        PrintTensorStats(
+            "LM head bias AFTER",
+            model.GetLMHeadBias()
+        );
+
+        PrintTensorStats(
+            "Embeddings AFTER",
+            model.GetEmbeddings()
+        );
+
+        // ====================================================
+        // Copy final parameters
+        // ====================================================
+
+        std::vector<float> final_weights(
+            model.GetLMHeadWeights().GetSize()
+        );
+
+        cudaMemcpy(
+            final_weights.data(),
+            model.GetLMHeadWeights().Data(),
+            final_weights.size() * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+        std::vector<float> final_bias(
+            model.GetLMHeadBias().GetSize()
+        );
+
+        cudaMemcpy(
+            final_bias.data(),
+            model.GetLMHeadBias().Data(),
+            final_bias.size() * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+        std::vector<float> final_embeddings(
+            model.GetEmbeddings().GetSize()
+        );
+
+        cudaMemcpy(
+            final_embeddings.data(),
+            model.GetEmbeddings().Data(),
+            final_embeddings.size() * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+        // ====================================================
+        // Parameter changes
+        // ====================================================
+
+        float weight_change =
+            MaxDifference(
+                initial_weights,
+                final_weights
+            );
+
+        float bias_change =
+            MaxDifference(
+                initial_bias,
+                final_bias
+            );
+
+        float embedding_change =
+            MaxDifference(
+                initial_embeddings,
+                final_embeddings
+            );
+
+        // ====================================================
+        // Result
+        // ====================================================
+
+        std::cout
+            << "\n========================================\n"
+            << "               RESULT\n"
+            << "========================================\n";
+
+        std::cout
+            << "Initial loss: "
+            << first_loss
+            << "\n";
+
+        std::cout
+            << "Final loss:   "
+            << final_loss_value
+            << "\n";
+
+        std::cout
+            << "Loss change:  "
+            << final_loss_value - first_loss
+            << "\n";
+
+        std::cout
+            << "LM weight change: "
+            << weight_change
+            << "\n";
+
+        std::cout
+            << "LM bias change:   "
+            << bias_change
+            << "\n";
+
+        std::cout
+            << "Embedding change: "
+            << embedding_change
+            << "\n";
+
+        std::cout
+            << "LM gradient:      "
+            << (lm_gradient_seen
+                    ? "OK"
+                    : "ZERO")
+            << "\n";
+
+        std::cout
+            << "Embedding gradient: "
+            << (embedding_gradient_seen
+                    ? "OK"
+                    : "ZERO")
+            << "\n";
+
+        // ====================================================
+        // Validation
+        // ====================================================
+
+        bool success = true;
+
+        if (!std::isfinite(final_loss_value)) {
+
+            std::cout
+                << "[FAIL] Final loss is not finite\n";
+
+            success = false;
+        }
+
+        if (!lm_gradient_seen) {
+
+            std::cout
+                << "[FAIL] LM gradient is zero\n";
+
+            success = false;
+        }
+
+        if (!embedding_gradient_seen) {
+
+            std::cout
+                << "[FAIL] Embedding gradient is zero\n";
+
+            success = false;
+        }
+
+        if (weight_change == 0.0f) {
+
+            std::cout
+                << "[FAIL] LM weights did not change\n";
+
+            success = false;
+        }
+
+        if (embedding_change == 0.0f) {
+
+            std::cout
+                << "[FAIL] Embeddings did not change\n";
+
+            success = false;
+        }
+
+        if (final_loss_value >= first_loss) {
+
+            std::cout
+                << "[FAIL] Loss did not decrease\n";
+
+            success = false;
+        }
+
+        // ====================================================
+        // Final
+        // ====================================================
+
+        if (success) {
+
+            std::cout
+                << "\n[OK] REAL TEXT CUDA TRAINING PASSED\n";
+
+        } else {
+
+            std::cout
+                << "\n[FAIL] REAL TEXT CUDA TRAINING FAILED\n";
+        }
+
+        std::cout
+            << "\n========================================\n"
+            << "             TEST FINISHED\n"
+            << "========================================\n";
+
+        return success ? 0 : 1;
+
+    } catch (const std::exception& error) {
+
+        std::cerr
+            << "\n========================================\n"
+            << "                 ERROR\n"
+            << "========================================\n"
+            << error.what()
+            << "\n";
+
+        return 1;
     }
-
-    if (weight_change == 0.0f &&
-        bias_change == 0.0f) {
-
-        std::cout
-            << "[FAIL] LM head parameters "
-               "did not change\n";
-
-        success = false;
-    }
-
-    if (!lm_gradient_seen) {
-
-        std::cout
-            << "[FAIL] LM head gradient is zero\n";
-
-        success = false;
-    }
-
-    if (!embedding_gradient_seen) {
-
-        std::cout
-            << "[FAIL] Embedding gradient is zero\n";
-
-        success = false;
-    }
-
-    if (final_loss_value >= first_loss) {
-
-        std::cout
-            << "[FAIL] Loss did not decrease\n";
-
-        success = false;
-    }
-
-    if (success) {
-
-        std::cout
-            << "\n[OK] CUDA training test passed\n";
-
-    } else {
-
-        std::cout
-            << "\n[FAIL] CUDA training test failed\n";
-    }
-
-    std::cout
-        << "\n========================================\n"
-        << "             TEST FINISHED\n"
-        << "========================================\n";
-
-    return success ? 0 : 1;
 }

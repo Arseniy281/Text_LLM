@@ -42,10 +42,6 @@ std::shared_ptr<Tensor> LanguageModel::forward(const std::shared_ptr<Tensor>& to
     ScopedTimer timer("LanguageModel::forward");
     auto x = embedding_.forward(tokens);
 
-std::cout << "Embedding output grad_fn: "
-          << (x->GradFn() != nullptr ? "YES" : "NO")
-          << "\n";
-
     if (x->GetShape().size() == 2) {
         auto reshape_op = std::make_shared<ReshapeOp>(
             std::vector<size_t>{

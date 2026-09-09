@@ -21,6 +21,7 @@ add_library(autograd_lib
     mul_scalar_op.cpp
     softmax_op.cpp
     transpose_op.cpp
+    reshape_op.cpp
 )
 
 target_include_directories(autograd_lib PUBLIC .)
