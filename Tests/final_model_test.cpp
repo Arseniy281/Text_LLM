@@ -29,7 +29,7 @@ const size_t CONTEXT = 32;
 
 // Batch = 1.
 // На каждом шаге берём новое случайное окно из всей книги.
-const size_t STEPS = 5000;
+const size_t STEPS = 20000;
 
 const float LR = 0.001f;
 
