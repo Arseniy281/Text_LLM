@@ -626,7 +626,7 @@ void Tensor::SetGradFn(std::shared_ptr<Operation> op) {
 
 void Tensor::backward(const Tensor& grad_output) {
 
-    std::cerr << "\n[TENSOR BACKWARD] START\n";
+    // std::cerr << "\n[TENSOR BACKWARD] START\n";
 
     if (grad_fn_ == nullptr) {
 
@@ -635,7 +635,7 @@ void Tensor::backward(const Tensor& grad_output) {
         );
     }
 
-    std::cerr << "[TENSOR BACKWARD] grad_fn exists\n";
+    // std::cerr << "[TENSOR BACKWARD] grad_fn exists\n";
 
     // ========================================
     // Build backward graph
@@ -644,31 +644,31 @@ void Tensor::backward(const Tensor& grad_output) {
     std::vector<Tensor*> graph;
     std::unordered_set<Tensor*> visited;
 
-    std::cerr
-        << "[TENSOR BACKWARD] BuildBackwardGraph START\n";
+    // std::cerr
+    //     << "[TENSOR BACKWARD] BuildBackwardGraph START\n";
 
     BuildBackwardGraph(
         graph,
         visited
     );
 
-    std::cerr
-        << "[TENSOR BACKWARD] BuildBackwardGraph OK"
-        << " | graph size = "
-        << graph.size()
-        << "\n";
+    // std::cerr
+    //     << "[TENSOR BACKWARD] BuildBackwardGraph OK"
+    //     << " | graph size = "
+    //     << graph.size()
+    //     << "\n";
 
     // ========================================
     // Initial gradient
     // ========================================
 
-    std::cerr
-        << "[TENSOR BACKWARD] Add initial grad START\n";
+    // std::cerr
+    //     << "[TENSOR BACKWARD] Add initial grad START\n";
 
     AddGrad(grad_output);
 
-    std::cerr
-        << "[TENSOR BACKWARD] Add initial grad OK\n";
+    // std::cerr
+    //     << "[TENSOR BACKWARD] Add initial grad OK\n";
 
     // ========================================
     // Backward pass
@@ -683,8 +683,8 @@ void Tensor::backward(const Tensor& grad_output) {
         Tensor* tensor = *it;
 
         if (tensor == nullptr) {
-            std::cerr
-                << "[TENSOR BACKWARD] NULL tensor!\n";
+            // std::cerr
+            //     << "[TENSOR BACKWARD] NULL tensor!\n";
             continue;
         }
 
@@ -692,23 +692,23 @@ void Tensor::backward(const Tensor& grad_output) {
             continue;
         }
 
-        std::cerr
-            << "\n[TENSOR BACKWARD] Operation #"
-            << operation_index
-            << "\n";
+        // std::cerr
+        //     << "\n[TENSOR BACKWARD] Operation #"
+        //     << operation_index
+        //     << "\n";
 
         operation_index++;
 
         const char* operation_name =
             tensor->grad_fn_->Name();
 
-        std::cerr
-            << "  Operation: "
-            << operation_name
-            << "\n";
+        // std::cerr
+        //     << "  Operation: "
+        //     << operation_name
+        //     << "\n";
 
-        std::cerr
-            << "  Tensor shape: [";
+        // std::cerr
+        //     << "  Tensor shape: [";
 
         for (size_t i = 0;
              i < tensor->shape_.size();
@@ -722,14 +722,14 @@ void Tensor::backward(const Tensor& grad_output) {
                 << tensor->shape_[i];
         }
 
-        std::cerr << "]\n";
+        // std::cerr << "]\n";
 
-        std::cerr
-            << "  Tensor device: "
-            << (tensor->device_ == Device::CUDA
-                ? "CUDA"
-                : "CPU")
-            << "\n";
+        // std::cerr
+        //     << "  Tensor device: "
+        //     << (tensor->device_ == Device::CUDA
+        //         ? "CUDA"
+        //         : "CPU")
+        //     << "\n";
 
         // ====================================
         // Проверяем gradient
@@ -737,8 +737,8 @@ void Tensor::backward(const Tensor& grad_output) {
 
         if (tensor->grad_ == nullptr) {
 
-            std::cerr
-                << "  ERROR: tensor->grad_ == nullptr\n";
+            // std::cerr
+            //     << "  ERROR: tensor->grad_ == nullptr\n";
 
             throw std::runtime_error(
                 std::string(
@@ -747,45 +747,45 @@ void Tensor::backward(const Tensor& grad_output) {
             );
         }
 
-        std::cerr
-            << "  Gradient shape: [";
+        // std::cerr
+        //     << "  Gradient shape: [";
 
-        for (size_t i = 0;
-             i < tensor->grad_->GetShape().size();
-             ++i) {
+        // for (size_t i = 0;
+        //      i < tensor->grad_->GetShape().size();
+        //      ++i) {
 
-            if (i > 0) {
-                std::cerr << ", ";
-            }
+            // if (i > 0) {
+            //     std::cerr << ", ";
+            // }
 
-            std::cerr
-                << tensor->grad_->GetShape()[i];
-        }
+            // std::cerr
+            //     << tensor->grad_->GetShape()[i];
+        // }
 
-        std::cerr << "]\n";
+        // std::cerr << "]\n";
 
-        std::cerr
-            << "  Gradient device: "
-            << (tensor->grad_->GetDevice() == Device::CUDA
-                ? "CUDA"
-                : "CPU")
-            << "\n";
+        // std::cerr
+        //     << "  Gradient device: "
+        //     << (tensor->grad_->GetDevice() == Device::CUDA
+        //         ? "CUDA"
+        //         : "CPU")
+        //     << "\n";
 
         // ====================================
         // Get inputs
         // ====================================
 
-        std::cerr
-            << "  GetInputs START\n";
+        // std::cerr
+        //     << "  GetInputs START\n";
 
         std::vector<std::shared_ptr<Tensor>> inputs =
             tensor->grad_fn_->GetInputs();
 
-        std::cerr
-            << "  GetInputs OK"
-            << " | inputs = "
-            << inputs.size()
-            << "\n";
+        // std::cerr
+        //     << "  GetInputs OK"
+        //     << " | inputs = "
+        //     << inputs.size()
+        //     << "\n";
 
         for (size_t i = 0;
              i < inputs.size();
@@ -793,37 +793,37 @@ void Tensor::backward(const Tensor& grad_output) {
 
             if (inputs[i] == nullptr) {
 
-                std::cerr
-                    << "    input["
-                    << i
-                    << "] = nullptr\n";
+                // std::cerr
+                //     << "    input["
+                //     << i
+                //     << "] = nullptr\n";
 
                 continue;
             }
 
-            std::cerr
-                << "    input["
-                << i
-                << "] shape = [";
+            // std::cerr
+            //     << "    input["
+            //     << i
+            //     << "] shape = [";
 
-            for (size_t j = 0;
-                 j < inputs[i]->GetShape().size();
-                 ++j) {
+            // for (size_t j = 0;
+            //      j < inputs[i]->GetShape().size();
+            //      ++j) {
 
-                if (j > 0) {
-                    std::cerr << ", ";
-                }
+            //     if (j > 0) {
+            //         std::cerr << ", ";
+            //     }
 
-                std::cerr
-                    << inputs[i]->GetShape()[j];
-            }
+            //     std::cerr
+            //         << inputs[i]->GetShape()[j];
+            // }
 
-            std::cerr
-                << "] device = "
-                << (inputs[i]->GetDevice() == Device::CUDA
-                    ? "CUDA"
-                    : "CPU")
-                << "\n";
+            // std::cerr
+            //     << "] device = "
+            //     << (inputs[i]->GetDevice() == Device::CUDA
+            //         ? "CUDA"
+            //         : "CPU")
+            //     << "\n";
         }
 
         // ====================================
