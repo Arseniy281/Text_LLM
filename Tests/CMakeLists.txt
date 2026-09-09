@@ -5,6 +5,10 @@ project(All_test)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+enable_language(CUDA)
+
+find_package(CUDAToolkit REQUIRED)
+
 # ============================================================
 # Apple Accelerate
 # ============================================================
@@ -19,11 +23,22 @@ endif()
 # ============================================================
 
 function(setup_target target)
-    target_include_directories(${target} PRIVATE .)
+
+    target_include_directories(${target} PRIVATE
+        .
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
 
     if(APPLE)
-        target_link_libraries(${target} PRIVATE ${ACCELERATE_FRAMEWORK})
+        target_link_libraries(${target} PRIVATE
+            ${ACCELERATE_FRAMEWORK}
+        )
     endif()
+
+    target_link_libraries(${target} PRIVATE
+        CUDA::cudart
+    )
+
 endfunction()
 
 
@@ -525,6 +540,7 @@ add_executable(final_model_test
     ../../Engine/Tensor/backend.cpp
     ../../Engine/Tensor/cpu_backend.cpp
     ../../Engine/Tensor/matmul.cpp
+    ../../Engine/Tensor/cuda_backend.cu
 
     # Autograd
     ../../Engine/Autograd/add_op.cpp
