@@ -6,39 +6,24 @@
 #include <memory>
 #include <stdexcept>
 
-EmbeddingLayer::EmbeddingLayer(
-    size_t vocab_size,
-    size_t embedding_dim,
-    Device device
-)
+EmbeddingLayer::EmbeddingLayer(size_t vocab_size, size_t embedding_dim, Device device)
     : vocab_size_(vocab_size),
       embedding_dim_(embedding_dim),
       embeddings_(
           Tensor::Random(
               {vocab_size, embedding_dim},
               -0.1f,
-              0.1f
+              0.1f,
+              device
           )
       ),
-      grad_(std::make_shared<Tensor>(
-          std::vector<size_t>{vocab_size, embedding_dim},
-          0.0f,
-          device
-      )) {
-
-    if (device == Device::CUDA) {
-        Tensor cpu_embeddings = Tensor::Random(
-            {vocab_size, embedding_dim},
-            -0.1f,
-            0.1f
-        );
-
-        embeddings_ = Tensor(
-            {vocab_size, embedding_dim},
-            cpu_embeddings.Data()
-        );
-    }
-}
+      grad_(
+          std::make_shared<Tensor>(
+              std::vector<size_t>{vocab_size, embedding_dim},
+              0.0f,
+              device
+          )
+      ) {}
 
 
 std::shared_ptr<Tensor> EmbeddingLayer::forward(const std::shared_ptr<Tensor>& indices) {
