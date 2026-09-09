@@ -413,11 +413,12 @@ int main() {
             << "           TOKENIZATION\n"
             << "========================================\n";
 
-        BPETokenizer tokenizer(
+        BPETokenizer tokenizer;
+
+        tokenizer.Train(
+            text,
             VOCAB_SIZE
         );
-
-        tokenizer.Train(text);
 
         std::vector<size_t> tokens =
             tokenizer.Encode(text);
