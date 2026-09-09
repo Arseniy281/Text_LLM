@@ -6,10 +6,14 @@
 #include <stdexcept>
 
 EmbeddingLayer::EmbeddingLayer(size_t vocab_size, size_t embedding_dim, Device device)
-        : vocab_size_(vocab_size),
+    : vocab_size_(vocab_size),
       embedding_dim_(embedding_dim),
       embeddings_({vocab_size, embedding_dim}, device),
-      grad_(nullptr) {}
+      grad_(std::make_shared<Tensor>(
+          std::vector<size_t>{vocab_size, embedding_dim},
+          0.0f,
+          device
+      )) {}
 
 
 std::shared_ptr<Tensor> EmbeddingLayer::forward(const std::shared_ptr<Tensor>& indices) {
