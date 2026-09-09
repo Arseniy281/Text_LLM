@@ -1,0 +1,16 @@
+build/
+cmake-build-*/
+.vscode/
+.idea/
+.DS_Store
+
+*.o
+*.d
+*.a
+*.so
+*.dylib
+*.exe
+
+Models/
+Data/
+roadmap.md
