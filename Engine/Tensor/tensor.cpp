@@ -194,7 +194,7 @@ Tensor::Tensor(std::vector<size_t> shape, UninitializedTag)
 }
 
 Tensor Tensor::Random(std::vector<size_t> shape, float min, float max, Device device) {
-    Tensor result(shape, UninitializedTag{});
+    Tensor result(shape, device);
 
     static std::mt19937 gen(42);
     std::uniform_real_distribution<float> dist(min, max);
