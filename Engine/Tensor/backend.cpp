@@ -1,16 +1,18 @@
 #include "backend.h"
 #include "cpu_backend.h"
+#include "cuda_backend.h"
 
 Backend& GetBackend(Device device) {
     switch (device) {
-        case Device::CPU:
+        case Device::CPU: {
             static CPUBackend cpu_backend;
             return cpu_backend;
+        }
 
-        case Device::CUDA:
-            throw std::runtime_error(
-                "CUDA backend is not available"
-            );
+        case Device::CUDA: {
+            static CUDABackend cuda_backend;
+            return cuda_backend;
+        }
     }
 
     throw std::runtime_error(
