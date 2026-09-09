@@ -1,6 +1,7 @@
 #include "../Autograd/embedding_op.h"
 #include "embedding_layer.h"
 #include "../Tensor/tensor.h"
+#include <cuda_runtime.h>
 
 #include <memory>
 #include <stdexcept>
