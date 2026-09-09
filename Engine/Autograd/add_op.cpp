@@ -47,8 +47,38 @@ std::vector<Tensor> AddOp::backward(const Tensor& grad_output) {
     }
 
     if (grad_output.GetShape() != final_shape_) {
-        throw std::runtime_error("AddOp::backward: grad_output shape mismatch");
+    std::cerr << "\n========== AddOp SHAPE ERROR ==========\n";
+
+    std::cerr << "first shape: ";
+    for (size_t x : first_->GetShape()) {
+        std::cerr << x << " ";
     }
+    std::cerr << "\n";
+
+    std::cerr << "second shape: ";
+    for (size_t x : second_->GetShape()) {
+        std::cerr << x << " ";
+    }
+    std::cerr << "\n";
+
+    std::cerr << "final shape: ";
+    for (size_t x : final_shape_) {
+        std::cerr << x << " ";
+    }
+    std::cerr << "\n";
+
+    std::cerr << "grad_output shape: ";
+    for (size_t x : grad_output.GetShape()) {
+        std::cerr << x << " ";
+    }
+    std::cerr << "\n";
+
+    std::cerr << "=======================================\n";
+
+    throw std::runtime_error(
+        "AddOp::backward: grad_output shape mismatch"
+    );
+}
 
     Device device = first_->GetDevice();
 
