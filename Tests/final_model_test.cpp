@@ -908,7 +908,7 @@ int main() {
         size_t num_heads = 2;
         size_t hidden_dim = 32;
 
-        float learning_rate = 0.0001ff;
+        float learning_rate = 0.0001f;
         int epochs = 1;
 
         LanguageModel model(
