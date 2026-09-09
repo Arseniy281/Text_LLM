@@ -1,12 +1,14 @@
 #include "tensor.h"
 #include "device.h"
+
+#include <cuda_runtime.h>
+
 #include <fstream>
 #include <sstream>
 #include <chrono>
 #include <iostream>
 #include <iomanip>
 #include <cstdlib>
-// #include <cuda_runtime.h>
 
 namespace {
 
@@ -279,42 +281,6 @@ Tensor::Tensor(std::vector<size_t> shape, float k, Device device)
     }
 }
 
-Tensor::Tensor(std::vector<size_t> shape, float k, Device device)
-        : shape_(std::move(shape)), device_(device) {
-
-    rank_ = shape_.size();
-    size_ = 1;
-
-    for (size_t dim : shape_) {
-        size_ *= dim;
-    }
-
-    Allocate();
-
-    if (device_ == Device::CPU) {
-        for (size_t i = 0; i < size_; i++) {
-            data_[i] = k;
-        }
-
-    } else {
-        if (k != 0.0f) {
-            throw std::runtime_error(
-                "Tensor CUDA scalar initialization "
-                "currently supports only zero"
-            );
-        }
-
-        // cudaError_t error = cudaMemset(data_, 0, size_ * sizeof(float));
-
-        // if (error != cudaSuccess) {
-        //     throw std::runtime_error(
-        //         std::string("cudaMemset failed: ") +
-        //         cudaGetErrorString(error)
-        //     );
-        // }
-    }
-}
-
 Tensor::~Tensor() {
     Free();
 }
@@ -358,35 +324,6 @@ Tensor::Tensor(const Tensor& other)
             );
         }
     }
-}
-
-Tensor& Tensor::operator=(const Tensor& other) {
-
-    if (this == &other) {
-        return *this;
-    }
-
-    Free();
-
-    shape_ = other.shape_;
-    size_ = other.size_;
-    rank_ = other.rank_;
-    device_ = other.device_;
-
-    if (other.data_ != nullptr) {
-        Allocate();
-
-        std::copy(
-            other.data_,
-            other.data_ + size_,
-            data_
-        );
-    }
-
-    grad_ = other.grad_;
-    grad_fn_ = other.grad_fn_;
-
-    return *this;
 }
 
 Tensor::Tensor(Tensor&& other) noexcept
@@ -455,11 +392,6 @@ Tensor& Tensor::operator=(const Tensor& other) {
 
     return *this;
 }
-
-Device Tensor::GetDevice() const {
-    return device_;
-}
-
 
 float& Tensor::at(size_t index) {
     return data_[index];
