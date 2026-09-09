@@ -833,84 +833,70 @@ void PrintTokens(
 
 int main() {
     try {
+        std::cerr << "\n=== CUDA Training & Generation Test ===\n";
 
-        std::cout
-            << "=== CUDA Training & Generation Test ===\n\n";
-
-        using Clock =
-            std::chrono::high_resolution_clock;
-
-
-        // ====================================================
-        // CUDA DEVICE
-        // ====================================================
+        // ============================================================
+        // CUDA
+        // ============================================================
 
         int device_count = 0;
-
         CheckCUDA(
             cudaGetDeviceCount(&device_count),
-            "cudaGetDeviceCount"
+            "cudaGetDeviceCount failed"
         );
 
         if (device_count == 0) {
-            throw std::runtime_error(
-                "No CUDA devices found"
-            );
+            throw std::runtime_error("No CUDA devices found");
         }
 
         cudaDeviceProp prop{};
-
         CheckCUDA(
-            cudaGetDeviceProperties(
-                &prop,
-                0
-            ),
-            "cudaGetDeviceProperties"
+            cudaGetDeviceProperties(&prop, 0),
+            "cudaGetDeviceProperties failed"
         );
 
-        std::cout
-            << "CUDA device: "
-            << prop.name
-            << "\n";
+        std::cerr << "CUDA device: " << prop.name << "\n";
+        std::cerr << "VRAM: "
+                  << static_cast<double>(prop.totalGlobalMem) / (1024.0 * 1024.0)
+                  << " MB\n";
 
-        std::cout
-            << "VRAM: "
-            << static_cast<double>(
-                prop.totalGlobalMem
-            ) / (1024.0 * 1024.0)
-            << " MB\n\n";
-
-
-        // ====================================================
-        // TOKENIZER
-        // ====================================================
+        // ============================================================
+        // Tokenizer
+        // ============================================================
 
         BPETokenizer tokenizer;
 
         std::string corpus =
             "hello world hello world hello world";
 
-        tokenizer.Train(
-            corpus,
-            50
-        );
+        tokenizer.Train(corpus, 50);
 
-        tokenizer.Save(
-            "vocab.txt"
-        );
+        tokenizer.Save("vocab.txt");
 
-        std::cout
-            << "Vocabulary size: "
-            << tokenizer.GetVocabSize()
-            << "\n\n";
+        size_t vocab_size = tokenizer.GetVocabSize();
 
+        std::cerr << "Vocabulary size: "
+                  << vocab_size << "\n";
 
-        // ====================================================
-        // MODEL
-        // ====================================================
+        std::vector<int> tokens = tokenizer.Encode("hello world");
 
-        size_t vocab_size =
-            tokenizer.GetVocabSize();
+        std::cerr << "Tokens: ";
+
+        for (int token : tokens) {
+            std::cerr << token << " ";
+        }
+
+        std::cerr << "\n";
+
+        if (tokens.size() < 2) {
+            throw std::runtime_error(
+                "Not enough tokens for training"
+            );
+        }
+
+        // ============================================================
+        // Model
+        // ============================================================
 
         size_t embed_dim = 16;
         size_t num_blocks = 2;
@@ -919,7 +905,11 @@ int main() {
 
         float learning_rate = 0.01f;
 
-        int epochs = 1000;
+        // Пока только один epoch.
+        // Нам сейчас важнее найти место падения.
+        int epochs = 1;
+
+        std::cerr << "Creating model...\n";
 
         LanguageModel model(
             vocab_size,
@@ -930,172 +920,89 @@ int main() {
             Device::CUDA
         );
 
-        std::cout
-            << "Model created on CUDA\n\n";
-
-
-        // ====================================================
-        // DATA
-        // ====================================================
-
-        std::vector<int> tokens =
-            PrepareBatch(
-                "hello world",
-                tokenizer
-            );
-
-        std::cout
-            << "Tokens: ";
-
-        for (int token : tokens) {
-            std::cout
-                << token
-                << " ";
-        }
-
-        std::cout << "\n\n";
-
-        if (tokens.size() < 2) {
-            throw std::runtime_error(
-                "Not enough tokens for training"
-            );
-        }
-
-
-        // ====================================================
-        // LOSS
-        // ====================================================
+        std::cerr << "Model created on CUDA\n";
 
         CrossEntropyLoss loss_fn;
 
-
-        // ====================================================
-        // TRAINING
-        // ====================================================
-
-        std::cout
-            << "========================================\n";
-        std::cout
-            << "        CUDA TRAINING\n";
-        std::cout
-            << "========================================\n\n";
-
         model.SetUseKVCache(false);
 
+        // ============================================================
+        // Training
+        // ============================================================
 
-        double total_forward_ms = 0.0;
-        double total_loss_ms = 0.0;
-        double total_backward_ms = 0.0;
-        double total_update_ms = 0.0;
-        double total_step_ms = 0.0;
+        std::cerr << "\n========================================\n";
+        std::cerr << "        CUDA TRAINING\n";
+        std::cerr << "========================================\n";
 
-        size_t total_steps = 0;
+        for (int epoch = 0; epoch < epochs; ++epoch) {
 
-        auto training_start =
-            Clock::now();
-
-
-        for (int epoch = 0;
-             epoch < epochs;
-             epoch++) {
+            std::cerr
+                << "\n========== EPOCH "
+                << epoch
+                << " ==========\n";
 
             float total_loss = 0.0f;
 
-            double epoch_forward_ms = 0.0;
-            double epoch_loss_ms = 0.0;
-            double epoch_backward_ms = 0.0;
-            double epoch_update_ms = 0.0;
-            double epoch_total_ms = 0.0;
+            for (size_t i = 0; i < tokens.size() - 1; ++i) {
 
+                std::cerr
+                    << "\n----------------------------------------\n";
+                std::cerr
+                    << "STEP "
+                    << i
+                    << " / "
+                    << tokens.size() - 2
+                    << "\n";
 
-            auto epoch_start =
-                Clock::now();
+                // ====================================================
+                // Reset cache
+                // ====================================================
 
-
-            // ------------------------------------------------
-            // Каждая позиция является отдельным training step
-            // ------------------------------------------------
-
-            for (size_t i = 0;
-                 i < tokens.size() - 1;
-                 i++) {
-
-                auto step_start =
-                    Clock::now();
-
-
-                // ============================================
-                // RESET CACHE
-                // ============================================
+                std::cerr << "[1] ResetCache...\n";
 
                 model.ResetCache();
 
+                std::cerr << "[1] ResetCache OK\n";
 
-                // ============================================
-                // INPUT
-                //
-                // Например:
-                //
-                // i = 0
-                // input  = [hello]
-                //
-                // i = 1
-                // input  = [hello world]
-                //
-                // ============================================
+                // ====================================================
+                // Input
+                // ====================================================
 
                 size_t seq_len = i + 1;
 
-                std::vector<float> host_input(
-                    seq_len
-                );
+                std::vector<float> host_input(seq_len);
 
-                for (size_t j = 0;
-                     j < seq_len;
-                     j++) {
-
+                for (size_t j = 0; j < seq_len; ++j) {
                     host_input[j] =
-                        static_cast<float>(
-                            tokens[j]
-                        );
+                        static_cast<float>(tokens[j]);
                 }
 
-                Tensor input =
-                    MakeCudaTensor(
-                        {1, seq_len},
-                        host_input
-                    );
+                std::cerr << "[2] Creating input tensor...\n";
+
+                Tensor input = MakeCudaTensor(
+                    {1, seq_len},
+                    host_input
+                );
 
                 auto input_ptr =
                     std::make_shared<Tensor>(
                         std::move(input)
                     );
 
-
-                // ============================================
-                // TARGETS
-                //
-                // Для:
-                //
-                // input  = [hello world]
-                //
-                // target = [world ?]
-                //
-                // Но CE работает по всей последовательности,
-                // поэтому делаем target для каждой позиции.
-                //
-                // Здесь последний target известен точно.
-                //
-                // ============================================
-
-                std::vector<float> host_targets(
-                    seq_len
+                CheckTensorCUDA(
+                    *input_ptr,
+                    "training input"
                 );
 
-                for (size_t j = 0;
-                     j < seq_len;
-                     j++) {
+                std::cerr << "[2] Input OK\n";
 
+                // ====================================================
+                // Targets
+                // ====================================================
+
+                std::vector<float> host_targets(seq_len);
+
+                for (size_t j = 0; j < seq_len; ++j) {
                     size_t target_index =
                         std::min(
                             j + 1,
@@ -1108,24 +1015,30 @@ int main() {
                         );
                 }
 
-                Tensor targets =
-                    MakeCudaTensor(
-                        {1, seq_len},
-                        host_targets
-                    );
+                std::cerr << "[3] Creating target tensor...\n";
 
+                Tensor targets = MakeCudaTensor(
+                    {1, seq_len},
+                    host_targets
+                );
 
-                // ============================================
-                // FORWARD
-                // ============================================
+                CheckTensorCUDA(
+                    targets,
+                    "training targets"
+                );
 
-                auto forward_start =
-                    Clock::now();
+                std::cerr << "[3] Targets OK\n";
+
+                // ====================================================
+                // Forward
+                // ====================================================
+
+                std::cerr << "[4] Forward START...\n";
 
                 auto logits_ptr =
-                    model.forward(
-                        input_ptr
-                    );
+                    model.forward(input_ptr);
+
+                std::cerr << "[4] Forward returned\n";
 
                 CheckTensorCUDA(
                     *logits_ptr,
@@ -1137,37 +1050,30 @@ int main() {
                     "forward cudaDeviceSynchronize"
                 );
 
-                auto forward_end =
-                    Clock::now();
+                std::cerr << "[4] Forward CUDA OK\n";
 
-                double forward_ms =
-                    std::chrono::duration<
-                        double,
-                        std::milli
-                    >(
-                        forward_end -
-                        forward_start
-                    ).count();
+                std::cerr
+                    << "    logits shape: ";
 
-                epoch_forward_ms +=
-                    forward_ms;
+                for (size_t dim : logits_ptr->GetShape()) {
+                    std::cerr << dim << " ";
+                }
 
-                total_forward_ms +=
-                    forward_ms;
+                std::cerr << "\n";
 
+                // ====================================================
+                // Loss
+                // ====================================================
 
-                // ============================================
-                // LOSS
-                // ============================================
-
-                auto loss_start =
-                    Clock::now();
+                std::cerr << "[5] Loss START...\n";
 
                 Tensor loss =
                     loss_fn.forward(
                         *logits_ptr,
                         targets
                     );
+
+                std::cerr << "[5] Loss returned\n";
 
                 CheckTensorCUDA(
                     loss,
@@ -1179,435 +1085,230 @@ int main() {
                     "loss cudaDeviceSynchronize"
                 );
 
+                std::cerr << "[5] Loss CUDA OK\n";
+
                 float loss_value =
                     GetCudaScalar(loss);
 
-                auto loss_end =
-                    Clock::now();
+                std::cerr
+                    << "    Loss = "
+                    << loss_value
+                    << "\n";
 
-                double loss_ms =
-                    std::chrono::duration<
-                        double,
-                        std::milli
-                    >(
-                        loss_end -
-                        loss_start
-                    ).count();
+                total_loss += loss_value;
 
-                epoch_loss_ms +=
-                    loss_ms;
+                // ====================================================
+                // Loss backward
+                // ====================================================
 
-                total_loss_ms +=
-                    loss_ms;
-
-                total_loss +=
-                    loss_value;
-
-
-                // ============================================
-                // BACKWARD
-                // ============================================
-
-                auto backward_start =
-                    Clock::now();
+                std::cerr << "[6] Loss backward START...\n";
 
                 Tensor grad_logits =
                     loss_fn.backward();
+
+                std::cerr
+                    << "[6] Loss backward returned\n";
 
                 CheckTensorCUDA(
                     grad_logits,
                     "grad_logits"
                 );
 
+                CheckCUDA(
+                    cudaDeviceSynchronize(),
+                    "loss backward cudaDeviceSynchronize"
+                );
+
+                std::cerr
+                    << "[6] Loss backward CUDA OK\n";
+
+                // ====================================================
+                // Autograd backward
+                // ====================================================
+
+                std::cerr
+                    << "[7] Autograd backward START...\n";
+
                 logits_ptr->backward(
                     grad_logits
                 );
 
+                std::cerr
+                    << "[7] Autograd backward returned\n";
+
                 CheckCUDA(
                     cudaDeviceSynchronize(),
-                    "backward cudaDeviceSynchronize"
+                    "autograd backward cudaDeviceSynchronize"
                 );
 
-                auto backward_end =
-                    Clock::now();
+                std::cerr
+                    << "[7] Autograd backward CUDA OK\n";
 
-                double backward_ms =
-                    std::chrono::duration<
-                        double,
-                        std::milli
-                    >(
-                        backward_end -
-                        backward_start
-                    ).count();
+                // ====================================================
+                // Update
+                // ====================================================
 
-                epoch_backward_ms +=
-                    backward_ms;
+                std::cerr << "[8] Update START...\n";
 
-                total_backward_ms +=
-                    backward_ms;
+                model.Update(learning_rate);
 
-
-                // ============================================
-                // UPDATE
-                // ============================================
-
-                auto update_start =
-                    Clock::now();
-
-                model.Update(
-                    learning_rate
-                );
+                std::cerr << "[8] Update returned\n";
 
                 CheckCUDA(
                     cudaDeviceSynchronize(),
                     "update cudaDeviceSynchronize"
                 );
 
+                std::cerr << "[8] Update CUDA OK\n";
+
+                // ====================================================
+                // Clear gradients
+                // ====================================================
+
+                std::cerr << "[9] ClearGrad START...\n";
+
                 model.ClearGrad();
 
-                auto update_end =
-                    Clock::now();
+                std::cerr << "[9] ClearGrad OK\n";
 
-                double update_ms =
-                    std::chrono::duration<
-                        double,
-                        std::milli
-                    >(
-                        update_end -
-                        update_start
-                    ).count();
-
-                epoch_update_ms +=
-                    update_ms;
-
-                total_update_ms +=
-                    update_ms;
-
-
-                // ============================================
-                // STEP TOTAL
-                // ============================================
-
-                auto step_end =
-                    Clock::now();
-
-                double step_ms =
-                    std::chrono::duration<
-                        double,
-                        std::milli
-                    >(
-                        step_end -
-                        step_start
-                    ).count();
-
-                epoch_total_ms +=
-                    step_ms;
-
-                total_step_ms +=
-                    step_ms;
-
-                total_steps++;
+                std::cerr
+                    << "STEP "
+                    << i
+                    << " FINISHED\n";
             }
 
+            float average_loss =
+                total_loss /
+                static_cast<float>(tokens.size() - 1);
 
-            auto epoch_end =
-                Clock::now();
-
-            double real_epoch_ms =
-                std::chrono::duration<
-                    double,
-                    std::milli
-                >(
-                    epoch_end -
-                    epoch_start
-                ).count();
-
-
-            // =================================================
-            // LOGGING
-            // =================================================
-
-            if (
-                epoch % 100 == 0 ||
-                epoch == epochs - 1
-            ) {
-
-                double steps_per_second =
-                    epoch_total_ms > 0.0
-                        ? static_cast<double>(
-                              tokens.size() - 1
-                          ) /
-                          (
-                              epoch_total_ms /
-                              1000.0
-                          )
-                        : 0.0;
-
-                std::cout
-                    << "Epoch "
-                    << std::setw(4)
-                    << epoch
-                    << " | Loss: "
-                    << std::fixed
-                    << std::setprecision(6)
-                    << total_loss /
-                       static_cast<float>(
-                           tokens.size() - 1
-                       )
-                    << "\n";
-
-                std::cout
-                    << "    Forward : "
-                    << std::setprecision(3)
-                    << epoch_forward_ms
-                    << " ms\n";
-
-                std::cout
-                    << "    Loss    : "
-                    << epoch_loss_ms
-                    << " ms\n";
-
-                std::cout
-                    << "    Backward: "
-                    << epoch_backward_ms
-                    << " ms\n";
-
-                std::cout
-                    << "    Update  : "
-                    << epoch_update_ms
-                    << " ms\n";
-
-                std::cout
-                    << "    Total   : "
-                    << real_epoch_ms
-                    << " ms\n";
-
-                std::cout
-                    << "    Steps/s : "
-                    << steps_per_second
-                    << "\n\n";
-            }
+            std::cerr
+                << "\nEPOCH "
+                << epoch
+                << " FINISHED"
+                << " | Average loss: "
+                << average_loss
+                << "\n";
         }
 
+        // ============================================================
+        // Generation
+        // ============================================================
 
-        auto training_end =
-            Clock::now();
-
-        double training_ms =
-            std::chrono::duration<
-                double,
-                std::milli
-            >(
-                training_end -
-                training_start
-            ).count();
-
-
-        // ====================================================
-        // PROFILE
-        // ====================================================
-
-        std::cout << "\n";
-        std::cout
-            << "========================================\n";
-        std::cout
-            << "        CUDA TRAINING PROFILE\n";
-        std::cout
-            << "========================================\n";
-
-        std::cout
-            << "Total training time: "
-            << training_ms / 1000.0
-            << " s\n";
-
-        std::cout
-            << "Total steps: "
-            << total_steps
-            << "\n\n";
-
-        std::cout
-            << "Forward total : "
-            << total_forward_ms
-            << " ms\n";
-
-        std::cout
-            << "Loss total    : "
-            << total_loss_ms
-            << " ms\n";
-
-        std::cout
-            << "Backward total: "
-            << total_backward_ms
-            << " ms\n";
-
-        std::cout
-            << "Update total  : "
-            << total_update_ms
-            << " ms\n";
-
-        std::cout
-            << "Step total    : "
-            << total_step_ms
-            << " ms\n";
-
-
-        if (total_step_ms > 0.0) {
-
-            std::cout << "\n";
-
-            std::cout
-                << "Forward share : "
-                << total_forward_ms /
-                   total_step_ms *
-                   100.0
-                << " %\n";
-
-            std::cout
-                << "Loss share    : "
-                << total_loss_ms /
-                   total_step_ms *
-                   100.0
-                << " %\n";
-
-            std::cout
-                << "Backward share: "
-                << total_backward_ms /
-                   total_step_ms *
-                   100.0
-                << " %\n";
-
-            std::cout
-                << "Update share  : "
-                << total_update_ms /
-                   total_step_ms *
-                   100.0
-                << " %\n";
-        }
-
-        double steps_per_second =
-            total_steps /
-            (training_ms / 1000.0);
-
-        std::cout << "\n";
-
-        std::cout
-            << "Steps/sec : "
-            << steps_per_second
-            << "\n";
-
-        std::cout
-            << "Tokens/sec: "
-            << steps_per_second
-            << "\n";
-
-        std::cout
-            << "========================================\n";
-
-
-        // ====================================================
-        // PREDICTIONS
-        // ====================================================
-
-        TestPredictions(
-            model,
-            tokens
-        );
-
-
-        // ====================================================
-        // KV CACHE
-        // ====================================================
-
-        std::vector<int> test_tokens = {
-            7, 4, 11, 11, 14,
-            22, 14, 17, 11, 3
-        };
-
-        TestFullVsKVCache(
-            model,
-            test_tokens
-        );
-
-
-        // ====================================================
-        // GENERATION
-        // ====================================================
-
-        std::cout
-            << "\n=== CUDA Generation ===\n";
+        std::cerr << "\n========================================\n";
+        std::cerr << "        CUDA GENERATION\n";
+        std::cerr << "========================================\n";
 
         model.SetUseKVCache(true);
         model.ResetCache();
 
-        size_t start_token =
-            static_cast<size_t>(
-                tokens[0]
+        std::vector<int> generated = tokens;
+
+        const size_t generation_length = 10;
+
+        for (size_t step = 0;
+             step < generation_length;
+             ++step) {
+
+            std::cerr
+                << "[GEN "
+                << step
+                << "] START\n";
+
+            size_t seq_len = generated.size();
+
+            std::vector<float> host_input(seq_len);
+
+            for (size_t i = 0; i < seq_len; ++i) {
+                host_input[i] =
+                    static_cast<float>(generated[i]);
+            }
+
+            Tensor input = MakeCudaTensor(
+                {1, seq_len},
+                host_input
             );
 
-        int end_token_id = -1;
+            auto input_ptr =
+                std::make_shared<Tensor>(
+                    std::move(input)
+                );
 
-        int max_len = 20;
+            auto logits_ptr =
+                model.forward(input_ptr);
 
-        float temperature = 1.0f;
-
-        float top_p = 0.0f;
-
-        std::cout
-            << "Generating with greedy sample:\n";
-
-        std::vector<size_t> generated =
-            model.generate(
-                {start_token},
-                max_len,
-                temperature,
-                top_p,
-                end_token_id
+            CheckTensorCUDA(
+                *logits_ptr,
+                "generation logits"
             );
 
-        std::cout
-            << "Tokens: ";
+            CheckCUDA(
+                cudaDeviceSynchronize(),
+                "generation forward synchronize"
+            );
 
-        for (size_t t : generated) {
-            std::cout
-                << t
-                << " ";
+            std::vector<float> host_logits =
+                CopyToHost(*logits_ptr);
+
+            size_t vocab =
+                logits_ptr->GetShape().back();
+
+            size_t offset =
+                (logits_ptr->GetShape()[0] *
+                 logits_ptr->GetShape()[1] -
+                 1) * vocab;
+
+            int best_token = 0;
+
+            float best_value =
+                host_logits[offset];
+
+            for (size_t v = 1; v < vocab; ++v) {
+
+                float value =
+                    host_logits[offset + v];
+
+                if (value > best_value) {
+                    best_value = value;
+                    best_token =
+                        static_cast<int>(v);
+                }
+            }
+
+            generated.push_back(best_token);
+
+            std::cerr
+                << "[GEN "
+                << step
+                << "] token = "
+                << best_token
+                << "\n";
         }
 
-        std::cout << "\n";
+        std::cerr << "\nGenerated tokens:\n";
 
-        std::cout
-            << "Text: ";
+        for (int token : generated) {
+            std::cerr << token << " ";
+        }
 
-        PrintTokens(
-            generated,
-            tokenizer
-        );
+        std::cerr << "\n";
 
-        std::cout << "\n";
-
-        model.SetUseKVCache(false);
-        model.ResetCache();
-
-
-        std::cout
-            << "=== CUDA test completed ===\n";
-
+        std::cerr << "\n=== TEST FINISHED SUCCESSFULLY ===\n";
 
         return 0;
-
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
 
         std::cerr
             << "\n========================================\n";
         std::cerr
-            << "CUDA TEST FAILED\n";
+            << "        CUDA TEST FAILED\n";
         std::cerr
             << "========================================\n";
+
         std::cerr
+            << "Exception: "
             << e.what()
             << "\n";
-
-        cudaDeviceSynchronize();
 
         return 1;
     }
