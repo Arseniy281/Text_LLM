@@ -573,6 +573,8 @@ add_executable(final_model_test
     ../../Engine/Layers/feed_forward.cpp
     ../../Engine/Layers/embedding_layer.cpp
     ../../Engine/Layers/language_model.cpp
+    ../../Engine/Layers/ce_loss.cpp
+
 
     ../../Engine/Autograd/rms_norm_op.cpp
     ../../Engine/Autograd/embedding_op.cpp
