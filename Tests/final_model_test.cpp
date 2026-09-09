@@ -751,12 +751,13 @@ int main() {
             model.Update(learning_rate);
             model.ClearGrad();
         }
-
-        std::cout
-            << "Epoch " << epoch
-            << ", Loss: "
-            << total_loss / (tokens.size() - 1)
-            << "\n";
+        if (epoch % 100 == 0 || epoch == epochs - 1) {
+            std::cout
+                << "Epoch " << epoch
+                << ", Loss: "
+                << total_loss / (tokens.size() - 1)
+                << "\n";
+        }
     }
 
     TestPredictions(model, tokens);
