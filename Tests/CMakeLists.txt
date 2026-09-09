@@ -562,6 +562,7 @@ add_executable(final_model_test
     ../../Engine/Autograd/transpose_op.cpp
     ../../Engine/Autograd/rope_op.cpp
     ../../Engine/Autograd/softmax_op.cpp
+    ../../Engine/Autograd/reshape_op.cpp
 
     # Attention
     ../../Engine/Attention/attention.cpp
