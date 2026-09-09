@@ -41,10 +41,28 @@ std::shared_ptr<Tensor> LanguageModel::forward(const std::shared_ptr<Tensor>& to
     ScopedTimer timer("LanguageModel::forward");
     auto x = embedding_.forward(tokens);
 
-    if (x->GetShape().size() == 2) {
-        x = std::make_shared<Tensor>(x->Reshape({
-             1, x->GetShape()[0], x->GetShape()[1]}));
-    }
+std::cout << "Embedding output grad_fn: "
+          << (x->GradFn() != nullptr ? "YES" : "NO")
+          << "\n";
+
+if (x->GetShape().size() == 2) {
+    x = std::make_shared<Tensor>(
+        x->Reshape({
+            1,
+            x->GetShape()[0],
+            x->GetShape()[1]
+        })
+    );
+
+    std::cout << "Reshaped tensor grad_fn: "
+              << (x->GradFn() != nullptr ? "YES" : "NO")
+              << "\n";
+}
+
+    // if (x->GetShape().size() == 2) {
+    //     x = std::make_shared<Tensor>(x->Reshape({
+    //          1, x->GetShape()[0], x->GetShape()[1]}));
+    // }
 
     x = transformer_.forward(x);
     return lm_head_.forward(x);
