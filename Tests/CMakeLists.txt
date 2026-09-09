@@ -33,6 +33,10 @@ function(setup_target target)
         target_link_libraries(${target} PRIVATE
             ${ACCELERATE_FRAMEWORK}
         )
+    else()
+        target_link_libraries(${target} PRIVATE
+            openblas
+        )
     endif()
 
     target_link_libraries(${target} PRIVATE
