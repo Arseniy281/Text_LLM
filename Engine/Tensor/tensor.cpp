@@ -527,26 +527,9 @@ void Tensor::SetGrad(std::shared_ptr<Tensor> grad) {
 }
 
 void Tensor::AddGrad(Tensor grad) {
-
-    std::cerr << "\nAddGrad\n";
-
-    std::cerr << "current grad: ";
-
     if (grad_ == nullptr) {
         std::cerr << "nullptr";
-    } else {
-        for (size_t x : grad_->GetShape()) {
-            std::cerr << x << " ";
-        }
     }
-
-    std::cerr << "\nincoming grad: ";
-
-    for (size_t x : grad.GetShape()) {
-        std::cerr << x << " ";
-    }
-
-    std::cerr << "\n";
 
     if (grad_ == nullptr) {
         grad_ = std::make_shared<Tensor>(std::move(grad));
@@ -622,32 +605,6 @@ void Tensor::backward(const Tensor& grad_output) {
                 ) + operation_name
             );
         }
-
-        // ============================================
-        // DEBUG
-        // ============================================
-
-        std::cerr << "\nBACKWARD #" << operation_index
-                  << ": " << operation_name << "\n";
-
-        std::cerr << "tensor shape: ";
-
-        for (size_t x : tensor->GetShape()) {
-            std::cerr << x << " ";
-        }
-
-        std::cerr << "\ngrad shape: ";
-
-        for (size_t x : tensor->grad_->GetShape()) {
-            std::cerr << x << " ";
-        }
-
-        std::cerr << "\n";
-
-        // ============================================
-        // END DEBUG
-        // ============================================
-
         std::vector<std::shared_ptr<Tensor>> inputs =
             tensor->grad_fn_->GetInputs();
 
