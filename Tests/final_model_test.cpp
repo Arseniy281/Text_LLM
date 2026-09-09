@@ -47,88 +47,7 @@ float GetScalar(const Tensor& tensor) {
         );
     }
 
-    if (tensor.GetDevice() == Device::CPU) {
-        return tensor.at(0);
-    }
-
-    float value = 0.0f;
-
-    cudaMemcpy(
-        &value,
-        tensor.data_,
-        sizeof(float),
-        cudaMemcpyDeviceToHost
-    );
-
-    return value;
-}
-
-// ============================================================
-// Tensor statistics
-// ============================================================
-
-void PrintTensorStats(
-    const std::string& name,
-    const Tensor& tensor
-) {
-    std::vector<float> data(tensor.GetSize());
-
-    if (tensor.GetDevice() == Device::CPU) {
-        for (size_t i = 0; i < tensor.GetSize(); ++i) {
-            data[i] = tensor.at(i);
-        }
-    } else {
-        cudaMemcpy(
-            data.data(),
-            tensor.data_,
-            tensor.GetSize() * sizeof(float),
-            cudaMemcpyDeviceToHost
-        );
-    }
-
-    float min_value = data[0];
-    float max_value = data[0];
-
-    double sum = 0.0;
-    double norm = 0.0;
-
-    size_t nan_count = 0;
-    size_t inf_count = 0;
-
-    for (float value : data) {
-        min_value = std::min(min_value, value);
-        max_value = std::max(max_value, value);
-
-        sum += value;
-        norm += static_cast<double>(value) * value;
-
-        if (std::isnan(value)) {
-            nan_count++;
-        }
-
-        if (std::isinf(value)) {
-            inf_count++;
-        }
-    }
-
-    double mean = sum / data.size();
-
-    std::cout
-        << name
-        << " shape ";
-
-    for (size_t dimension : tensor.GetShape()) {
-        std::cout << dimension << " ";
-    }
-
-    std::cout
-        << "| min " << min_value
-        << " max " << max_value
-        << " mean " << mean
-        << " norm " << std::sqrt(norm)
-        << " NaN " << nan_count
-        << " Inf " << inf_count
-        << "\n";
+    return tensor.at(0);
 }
 
 // ============================================================
@@ -328,16 +247,6 @@ int main() {
         std::cout
             << "========================================\n";
 
-        PrintTensorStats(
-            "LM weights",
-            model.GetLMHeadWeights()
-        );
-
-        PrintTensorStats(
-            "Embeddings",
-            model.GetEmbeddings()
-        );
-
         // ----------------------------------------------------
         // Training
         // ----------------------------------------------------
@@ -494,16 +403,6 @@ int main() {
             << "             FINAL STATE\n";
         std::cout
             << "========================================\n";
-
-        PrintTensorStats(
-            "LM weights AFTER",
-            model.GetLMHeadWeights()
-        );
-
-        PrintTensorStats(
-            "Embeddings AFTER",
-            model.GetEmbeddings()
-        );
 
         // ----------------------------------------------------
         // Result
