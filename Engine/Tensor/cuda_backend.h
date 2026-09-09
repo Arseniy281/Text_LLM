@@ -10,6 +10,8 @@ private:
     Tensor MatMul2D(const Tensor& A, const Tensor& B) const;
     Tensor MatMul3D2D(const Tensor& A, const Tensor& B) const;
     Tensor MatMulBatched(const Tensor& A, const Tensor& B) const;
+
+    cublasHandle_t handle_;
 public:
     CUDABackend();
     ~CUDABackend();
