@@ -604,18 +604,6 @@ void Tensor::backward(const Tensor& grad_output) {
         const char* operation_name =
             tensor->grad_fn_->Name();
 
-        for (size_t i = 0;
-             i < tensor->shape_.size();
-             ++i) {
-
-            if (i > 0) {
-                std::cerr << ", ";
-            }
-
-            std::cerr
-                << tensor->shape_[i];
-        }
-
         if (tensor->grad_ == nullptr) {
             throw std::runtime_error(
                 std::string(
