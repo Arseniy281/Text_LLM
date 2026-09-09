@@ -1,14 +1,14 @@
 #include "feed_forward.h"
+#include "../Tensor/device.h"
 
 #include <memory>
 #include <string>
 #include <sys/stat.h>
 #include <errno.h>
 
-FeedForward::FeedForward(size_t embed_dim, size_t hidden_dim) {
-    fc1_ = LinearLayer(embed_dim, hidden_dim);
-    fc2_ = LinearLayer(hidden_dim, embed_dim);
-}
+FeedForward::FeedForward(size_t embed_dim, size_t hidden_dim, Device device)
+    : fc1_(embed_dim, hidden_dim, device),
+      fc2_(hidden_dim, embed_dim, device) {}
 
 std::shared_ptr<Tensor> FeedForward::forward(
         const std::shared_ptr<Tensor>& x) {

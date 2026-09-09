@@ -2,6 +2,8 @@
 #include "../Layers/linear_layer.h"
 #include "../Autograd/gelu.h"
 #include "../Tensor/tensor.h"
+#include "../Tensor/device.h"
+
 #include <string>
 
 class FeedForward {
@@ -9,7 +11,7 @@ private:
     LinearLayer fc1_;
     LinearLayer fc2_;
 public:
-    FeedForward(size_t embed_dim, size_t hidden_dim);
+    FeedForward(size_t embed_dim, size_t hidden_dim, Device device = Device::CPU);
     // Tensor forward(const Tensor& x);
     std::shared_ptr<Tensor> forward(const std::shared_ptr<Tensor>& x);
     void Update(float lr);

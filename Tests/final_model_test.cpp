@@ -1,23 +1,128 @@
 #include <chrono>
 #include <iomanip>
-#ifdef __CUDACC__
-#include <cuda_runtime.h>
-#endif
-
-#include "../Engine/Layers/language_model.h"
-#include "../Engine/Tokenizer/bpe_tokenizer.h"
-#include "../Engine/Tensor/tensor.h"
 #include <iostream>
 #include <vector>
 #include <string>
 #include <cmath>
+#include <memory>
+#include <algorithm>
 
 #include <cuda_runtime.h>
+
+#include "../Engine/Layers/language_model.h"
+#include "../Engine/Layers/ce_loss.h"
+#include "../Engine/Tokenizer/bpe_tokenizer.h"
+#include "../Engine/Tensor/tensor.h"
+#include "../Engine/Tensor/device.h"
+
+
+// ============================================================
+// CUDA helpers
+// ============================================================
+
+void CheckCUDA(cudaError_t error, const std::string& message) {
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            message + ": " + cudaGetErrorString(error)
+        );
+    }
+}
+
+
+// ------------------------------------------------------------
+// Создать CUDA Tensor из vector<float>
+// ------------------------------------------------------------
+
+Tensor MakeCudaTensor(
+    const std::vector<size_t>& shape,
+    const std::vector<float>& data
+) {
+    Tensor result(shape, Device::CUDA);
+
+    if (result.GetSize() != data.size()) {
+        throw std::runtime_error(
+            "MakeCudaTensor: size mismatch"
+        );
+    }
+
+    if (!data.empty()) {
+        CheckCUDA(
+            cudaMemcpy(
+                result.Data(),
+                data.data(),
+                data.size() * sizeof(float),
+                cudaMemcpyHostToDevice
+            ),
+            "cudaMemcpy HostToDevice"
+        );
+    }
+
+    return result;
+}
+
+
+// ------------------------------------------------------------
+// CUDA Tensor -> vector<float>
+// ------------------------------------------------------------
+
+std::vector<float> CopyToHost(const Tensor& tensor) {
+    std::vector<float> result(tensor.GetSize());
+
+    if (tensor.GetSize() == 0) {
+        return result;
+    }
+
+    CheckCUDA(
+        cudaMemcpy(
+            result.data(),
+            tensor.Data(),
+            tensor.GetSize() * sizeof(float),
+            cudaMemcpyDeviceToHost
+        ),
+        "cudaMemcpy DeviceToHost"
+    );
+
+    return result;
+}
+
+
+// ------------------------------------------------------------
+// CUDA scalar -> float
+// ------------------------------------------------------------
+
+float GetCudaScalar(const Tensor& tensor) {
+    if (tensor.GetSize() != 1) {
+        throw std::runtime_error(
+            "GetCudaScalar: tensor is not scalar"
+        );
+    }
+
+    std::vector<float> data = CopyToHost(tensor);
+    return data[0];
+}
+
+
+// ------------------------------------------------------------
+// Проверка device
+// ------------------------------------------------------------
+
+void CheckTensorCUDA(const Tensor& tensor, const std::string& name) {
+    if (tensor.GetDevice() != Device::CUDA) {
+        throw std::runtime_error(
+            name + " is not a CUDA tensor"
+        );
+    }
+}
+
+
+// ============================================================
+// Attention KV-cache test
+// ============================================================
 
 void TestAttentionKVCache() {
     std::cout << "\n";
     std::cout << "========================================\n";
-    std::cout << " ATTENTION FULL vs KV-CACHE\n";
+    std::cout << " ATTENTION FULL vs KV-CACHE CUDA\n";
     std::cout << "========================================\n";
 
     const size_t embed_dim = 16;
@@ -26,23 +131,33 @@ void TestAttentionKVCache() {
 
     MultiHeadAttention attention(
         embed_dim,
-        num_heads
+        num_heads,
+        Device::CUDA
     );
 
-    // ============================================================
-    // Создаём один и тот же вход
-    // ============================================================
+    // --------------------------------------------------------
+    // Один и тот же вход
+    // --------------------------------------------------------
 
-    Tensor x({1, seq_len, embed_dim});
+    std::vector<float> host_x(
+        seq_len * embed_dim
+    );
 
-    for (size_t i = 0; i < x.GetSize(); i++) {
-        x.at(i) =
+    for (size_t i = 0; i < host_x.size(); i++) {
+        host_x[i] =
             0.01f * static_cast<float>(i + 1);
     }
 
-    // ============================================================
-    // FULL FORWARD
-    // ============================================================
+    Tensor x = MakeCudaTensor(
+        {1, seq_len, embed_dim},
+        host_x
+    );
+
+    CheckTensorCUDA(x, "x");
+
+    // --------------------------------------------------------
+    // FULL
+    // --------------------------------------------------------
 
     std::cout << "\n[1] FULL FORWARD\n";
 
@@ -54,32 +169,45 @@ void TestAttentionKVCache() {
 
         attention.ResetCache();
 
-        auto input =
-            std::make_shared<Tensor>(
-                Tensor({1, len, embed_dim})
-            );
+        std::vector<float> prefix(
+            len * embed_dim
+        );
 
         for (size_t i = 0; i < len; i++) {
             for (size_t j = 0; j < embed_dim; j++) {
-
-                input->at({0, i, j}) =
-                    x.at({0, i, j});
+                prefix[i * embed_dim + j] =
+                    host_x[i * embed_dim + j];
             }
         }
 
+        Tensor input = MakeCudaTensor(
+            {1, len, embed_dim},
+            prefix
+        );
+
+        auto input_ptr =
+            std::make_shared<Tensor>(
+                std::move(input)
+            );
+
         auto output =
-            attention.forward(input);
+            attention.forward(input_ptr);
+
+        CheckTensorCUDA(
+            *output,
+            "attention full output"
+        );
+
+        std::vector<float> host_output =
+            CopyToHost(*output);
 
         std::vector<float> last(embed_dim);
 
         for (size_t j = 0; j < embed_dim; j++) {
-
             last[j] =
-                output->at({
-                    0,
-                    len - 1,
-                    j
-                });
+                host_output[
+                    (len - 1) * embed_dim + j
+                ];
         }
 
         full_outputs.push_back(last);
@@ -90,9 +218,9 @@ void TestAttentionKVCache() {
             << " completed\n";
     }
 
-    // ============================================================
-    // KV-CACHE FORWARD
-    // ============================================================
+    // --------------------------------------------------------
+    // KV CACHE
+    // --------------------------------------------------------
 
     std::cout << "\n[2] KV-CACHE FORWARD\n";
 
@@ -103,33 +231,39 @@ void TestAttentionKVCache() {
 
     for (size_t pos = 0; pos < seq_len; pos++) {
 
-        auto input =
+        std::vector<float> current_input(
+            embed_dim
+        );
+
+        for (size_t j = 0; j < embed_dim; j++) {
+            current_input[j] =
+                host_x[pos * embed_dim + j];
+        }
+
+        Tensor input = MakeCudaTensor(
+            {1, 1, embed_dim},
+            current_input
+        );
+
+        auto input_ptr =
             std::make_shared<Tensor>(
-                Tensor({1, 1, embed_dim})
+                std::move(input)
             );
 
-        for (size_t j = 0; j < embed_dim; j++) {
-
-            input->at({0, 0, j}) =
-                x.at({0, pos, j});
-        }
-
         auto output =
-            attention.forward(input);
+            attention.forward(input_ptr);
 
-        std::vector<float> current(embed_dim);
+        CheckTensorCUDA(
+            *output,
+            "attention cache output"
+        );
 
-        for (size_t j = 0; j < embed_dim; j++) {
+        std::vector<float> host_output =
+            CopyToHost(*output);
 
-            current[j] =
-                output->at({
-                    0,
-                    0,
-                    j
-                });
-        }
-
-        cache_outputs.push_back(current);
+        cache_outputs.push_back(
+            host_output
+        );
 
         std::cout
             << "CACHE position "
@@ -139,9 +273,9 @@ void TestAttentionKVCache() {
             << "\n";
     }
 
-    // ============================================================
+    // --------------------------------------------------------
     // COMPARE
-    // ============================================================
+    // --------------------------------------------------------
 
     std::cout << "\n[3] COMPARISON\n\n";
 
@@ -166,9 +300,11 @@ void TestAttentionKVCache() {
             }
         }
 
-        if (max_diff > global_max_diff) {
-            global_max_diff = max_diff;
-        }
+        global_max_diff =
+            std::max(
+                global_max_diff,
+                max_diff
+            );
 
         std::cout
             << "Position "
@@ -177,8 +313,11 @@ void TestAttentionKVCache() {
             << max_diff;
 
         if (max_diff < 1e-5f) {
+
             std::cout << "  OK";
+
         } else {
+
             std::cout << "  DIFFERENT";
 
             std::cout
@@ -197,10 +336,6 @@ void TestAttentionKVCache() {
         std::cout << "\n";
     }
 
-    // ============================================================
-    // RESULT
-    // ============================================================
-
     std::cout << "\n";
     std::cout
         << "Global max diff: "
@@ -208,11 +343,14 @@ void TestAttentionKVCache() {
         << "\n";
 
     if (global_max_diff < 1e-5f) {
+
         std::cout
-            << "RESULT: Attention KV-cache PASS\n";
+            << "RESULT: Attention KV-cache CUDA PASS\n";
+
     } else {
+
         std::cout
-            << "RESULT: Attention KV-cache FAIL\n";
+            << "RESULT: Attention KV-cache CUDA FAIL\n";
     }
 
     attention.SetUseKVCache(false);
@@ -221,32 +359,28 @@ void TestAttentionKVCache() {
     std::cout << "========================================\n";
 }
 
+
+// ============================================================
+// FULL vs KV CACHE for LanguageModel
+// ============================================================
+
 void TestFullVsKVCache(
     LanguageModel& model,
     const std::vector<int>& tokens
 ) {
     std::cout << "\n";
     std::cout << "========================================\n";
-    std::cout << " FULL FORWARD vs KV-CACHE FORWARD\n";
+    std::cout << " FULL FORWARD vs KV-CACHE CUDA\n";
     std::cout << "========================================\n";
 
     if (tokens.empty()) {
-        std::cout << "❌ ERROR: empty token sequence\n";
+        std::cout << "ERROR: empty token sequence\n";
         return;
     }
 
-    // ============================================================
-    // 1. FULL FORWARD
-    //
-    // Для каждого prefix полностью прогоняем последовательность.
-    //
-    // [7]
-    // [7 4]
-    // [7 4 11]
-    // ...
-    //
-    // KV-cache здесь ПОЛНОСТЬЮ выключен.
-    // ============================================================
+    // --------------------------------------------------------
+    // FULL
+    // --------------------------------------------------------
 
     std::cout << "\n[1] FULL FORWARD\n";
 
@@ -255,30 +389,50 @@ void TestFullVsKVCache(
     std::vector<std::vector<float>> full_logits;
 
     for (size_t len = 1; len <= tokens.size(); len++) {
+
         model.ResetCache();
 
-        auto input =
-            std::make_shared<Tensor>(
-                Tensor({1, len})
-            );
+        std::vector<float> host_input(len);
 
         for (size_t i = 0; i < len; i++) {
-            input->at({0, i}) =
+            host_input[i] =
                 static_cast<float>(tokens[i]);
         }
 
-        auto output = model.forward(input);
+        Tensor input = MakeCudaTensor(
+            {1, len},
+            host_input
+        );
+
+        auto input_ptr =
+            std::make_shared<Tensor>(
+                std::move(input)
+            );
+
+        auto output =
+            model.forward(input_ptr);
+
+        CheckTensorCUDA(
+            *output,
+            "model full output"
+        );
 
         size_t vocab_size =
             output->GetShape()[2];
 
-        size_t last_pos = len - 1;
+        std::vector<float> host_output =
+            CopyToHost(*output);
 
-        std::vector<float> logits(vocab_size);
+        std::vector<float> logits(
+            vocab_size
+        );
 
         for (size_t v = 0; v < vocab_size; v++) {
+
             logits[v] =
-                output->at({0, last_pos, v});
+                host_output[
+                    (len - 1) * vocab_size + v
+                ];
         }
 
         full_logits.push_back(logits);
@@ -289,20 +443,9 @@ void TestFullVsKVCache(
         << tokens.size()
         << " positions.\n";
 
-
-    // ============================================================
-    // 2. KV-CACHE FORWARD
-    //
-    // Здесь KV-cache ЯВНО включаем.
-    //
-    // forward(7)
-    // forward(4)
-    // forward(11)
-    // ...
-    //
-    // Только первый token является начальным состоянием.
-    // Каждый следующий token использует накопленный KV-cache.
-    // ============================================================
+    // --------------------------------------------------------
+    // KV CACHE
+    // --------------------------------------------------------
 
     std::cout << "\n[2] KV-CACHE FORWARD\n";
 
@@ -312,24 +455,40 @@ void TestFullVsKVCache(
     std::vector<std::vector<float>> cache_logits;
 
     for (size_t i = 0; i < tokens.size(); i++) {
-        auto input =
+
+        Tensor input = MakeCudaTensor(
+            {1, 1},
+            {
+                static_cast<float>(tokens[i])
+            }
+        );
+
+        auto input_ptr =
             std::make_shared<Tensor>(
-                Tensor({1, 1})
+                std::move(input)
             );
 
-        input->at({0, 0}) =
-            static_cast<float>(tokens[i]);
+        auto output =
+            model.forward(input_ptr);
 
-        auto output = model.forward(input);
+        CheckTensorCUDA(
+            *output,
+            "model cache output"
+        );
 
         size_t vocab_size =
             output->GetShape()[2];
 
-        std::vector<float> logits(vocab_size);
+        std::vector<float> host_output =
+            CopyToHost(*output);
+
+        std::vector<float> logits(
+            vocab_size
+        );
 
         for (size_t v = 0; v < vocab_size; v++) {
             logits[v] =
-                output->at({0, 0, v});
+                host_output[v];
         }
 
         cache_logits.push_back(logits);
@@ -340,10 +499,9 @@ void TestFullVsKVCache(
         << tokens.size()
         << " positions.\n";
 
-
-    // ============================================================
-    // 3. COMPARE
-    // ============================================================
+    // --------------------------------------------------------
+    // COMPARE
+    // --------------------------------------------------------
 
     std::cout << "\n[3] COMPARISON\n\n";
 
@@ -357,17 +515,16 @@ void TestFullVsKVCache(
 
     size_t different_predictions = 0;
 
-
-    for (size_t pos = 0; pos < tokens.size(); pos++) {
+    for (size_t pos = 0;
+         pos < tokens.size();
+         pos++) {
 
         float max_diff = 0.0f;
         size_t max_diff_token = 0;
 
-        // --------------------------------------------------------
-        // Сравниваем все logits
-        // --------------------------------------------------------
-
-        for (size_t v = 0; v < vocab_size; v++) {
+        for (size_t v = 0;
+             v < vocab_size;
+             v++) {
 
             float diff =
                 std::abs(
@@ -387,77 +544,73 @@ void TestFullVsKVCache(
             }
         }
 
-
-        // --------------------------------------------------------
-        // Argmax FULL
-        // --------------------------------------------------------
-
         size_t full_prediction = 0;
 
-        for (size_t v = 1; v < vocab_size; v++) {
-            if (full_logits[pos][v] >
-                full_logits[pos][full_prediction]) {
+        for (size_t v = 1;
+             v < vocab_size;
+             v++) {
 
+            if (
+                full_logits[pos][v] >
+                full_logits[pos][full_prediction]
+            ) {
                 full_prediction = v;
             }
         }
 
-
-        // --------------------------------------------------------
-        // Argmax CACHE
-        // --------------------------------------------------------
-
         size_t cache_prediction = 0;
 
-        for (size_t v = 1; v < vocab_size; v++) {
-            if (cache_logits[pos][v] >
-                cache_logits[pos][cache_prediction]) {
+        for (size_t v = 1;
+             v < vocab_size;
+             v++) {
 
+            if (
+                cache_logits[pos][v] >
+                cache_logits[pos][cache_prediction]
+            ) {
                 cache_prediction = v;
             }
         }
 
-
         bool same_prediction =
-            full_prediction == cache_prediction;
-
+            full_prediction ==
+            cache_prediction;
 
         if (!same_prediction) {
             different_predictions++;
         }
 
-
-        // --------------------------------------------------------
-        // Вывод
-        // --------------------------------------------------------
-
         std::cout
-            << "Position " << pos
-            << " | input=" << tokens[pos]
-            << " | FULL=" << full_prediction
-            << " | CACHE=" << cache_prediction
-            << " | max_diff=" << max_diff;
+            << "Position "
+            << pos
+            << " | input="
+            << tokens[pos]
+            << " | FULL="
+            << full_prediction
+            << " | CACHE="
+            << cache_prediction
+            << " | max_diff="
+            << max_diff;
 
-        if (same_prediction &&
-            max_diff < 1e-4f) {
+        if (
+            same_prediction &&
+            max_diff < 1e-4f
+        ) {
 
-            std::cout << "  ✅ OK";
+            std::cout << "  OK";
 
         } else if (same_prediction) {
 
-            std::cout << "  ⚠ PREDICTION OK, LOGITS DIFFER";
+            std::cout
+                << "  PREDICTION OK, LOGITS DIFFER";
 
         } else {
 
-            std::cout << "  ❌ DIFFERENT";
+            std::cout
+                << "  DIFFERENT";
         }
 
         std::cout << "\n";
-
-
-        // --------------------------------------------------------
-        // Показываем конкретное расхождение
-        // --------------------------------------------------------
 
         if (max_diff >= 1e-4f) {
 
@@ -478,13 +631,9 @@ void TestFullVsKVCache(
         }
     }
 
-
-    // ============================================================
-    // 4. FINAL RESULT
-    // ============================================================
-
     std::cout << "\n";
-    std::cout << "----------------------------------------\n";
+    std::cout
+        << "----------------------------------------\n";
 
     std::cout
         << "Different predictions: "
@@ -508,32 +657,24 @@ void TestFullVsKVCache(
         << global_token
         << "\n";
 
-
     bool passed =
         different_predictions == 0 &&
         global_max_diff < 1e-4f;
 
-
-    std::cout << "\n";
-
     if (passed) {
 
         std::cout
-            << "RESULT: FULL and KV-CACHE "
-            << "are equivalent. ✅ PASS\n";
+            << "\nRESULT: FULL and KV-CACHE "
+            << "are equivalent. PASS\n";
 
     } else {
 
         std::cout
-            << "RESULT: KV-CACHE IS NOT EQUIVALENT! ❌ FAIL\n";
+            << "\nRESULT: KV-CACHE IS NOT EQUIVALENT. FAIL\n";
     }
 
-    std::cout << "----------------------------------------\n";
-
-
-    // ============================================================
-    // 5. Возвращаем модель в обычный режим
-    // ============================================================
+    std::cout
+        << "----------------------------------------\n";
 
     model.SetUseKVCache(false);
     model.ResetCache();
@@ -543,712 +684,931 @@ void TestFullVsKVCache(
 }
 
 
+// ============================================================
+// Prediction test
+// ============================================================
+
 void TestPredictions(
     LanguageModel& model,
     const std::vector<int>& tokens
 ) {
     std::cout << "\n=== Prediction Test ===\n";
 
-    for (size_t i = 0; i < tokens.size() - 1; i++) {
+    if (tokens.size() < 2) {
+        return;
+    }
+
+    for (size_t i = 0;
+         i < tokens.size() - 1;
+         i++) {
+
         model.ResetCache();
 
-        auto input = std::make_shared<Tensor>(Tensor({1, i + 1}));
+        std::vector<float> host_input(i + 1);
 
         for (size_t j = 0; j <= i; j++) {
-            input->at({0, j}) = static_cast<float>(tokens[j]);
+            host_input[j] =
+                static_cast<float>(tokens[j]);
         }
 
-        auto logits_ptr = model.forward(input);
-        Tensor& logits = *logits_ptr;
+        Tensor input = MakeCudaTensor(
+            {1, i + 1},
+            host_input
+        );
 
-        size_t vocab_size = logits.GetShape()[2];
+        auto input_ptr =
+            std::make_shared<Tensor>(
+                std::move(input)
+            );
+
+        auto logits_ptr =
+            model.forward(input_ptr);
+
+        CheckTensorCUDA(
+            *logits_ptr,
+            "prediction logits"
+        );
+
+        size_t vocab_size =
+            logits_ptr->GetShape()[2];
+
+        std::vector<float> host_logits =
+            CopyToHost(*logits_ptr);
+
         size_t pos = i;
 
-        int predicted = 0;
-        float best = logits.at({0, pos, 0});
+        size_t predicted = 0;
 
-        for (size_t j = 1; j < vocab_size; j++) {
-            float value = logits.at({0, pos, j});
+        float best =
+            host_logits[
+                pos * vocab_size
+            ];
+
+        for (size_t j = 1;
+             j < vocab_size;
+             j++) {
+
+            float value =
+                host_logits[
+                    pos * vocab_size + j
+                ];
 
             if (value > best) {
                 best = value;
-                predicted = static_cast<int>(j);
+                predicted = j;
             }
         }
 
         std::cout
-            << "Step " << i
-            << ": expected " << tokens[i + 1]
-            << ", predicted " << predicted;
+            << "Step "
+            << i
+            << ": expected "
+            << tokens[i + 1]
+            << ", predicted "
+            << predicted;
 
-        if (predicted == tokens[i + 1]) {
-            std::cout << "  ✅\n";
+        if (
+            predicted ==
+            static_cast<size_t>(tokens[i + 1])
+        ) {
+
+            std::cout << "  OK\n";
+
         } else {
-            std::cout << "  ❌\n";
+
+            std::cout << "  FAIL\n";
         }
     }
 
     model.ResetCache();
 }
 
-class CrossEntropyLoss {
-private:
-    Tensor logits_;
-    size_t pos_;
-    int target_;
-    std::vector<float> softmax_output_;
 
-public:
-    // forward: принимает логиты [batch, seq_len, vocab_size], позицию pos и target
-    Tensor forward(const Tensor& logits, size_t pos, int target) {
-        logits_ = logits;
-        pos_ = pos;
-        target_ = target;
+// ============================================================
+// Prepare tokens
+// ============================================================
 
-        size_t vocab_size = logits.GetShape()[2];
+std::vector<int> PrepareBatch(
+    const std::string& text,
+    BPETokenizer& tokenizer
+) {
+    std::vector<size_t> ids =
+        tokenizer.Encode(text);
 
-        // 1. Извлекаем последний логит (по позиции pos)
-        Tensor last_logits({vocab_size});
-        for (size_t i = 0; i < vocab_size; i++) {
-            last_logits.at(i) = logits.at({0, pos, i});
-        }
-
-        const float* data = last_logits.Data();
-
-        // 2. Численная стабильность: вычитаем максимум
-        float max_val = data[0];
-        for (size_t i = 1; i < vocab_size; i++) {
-            if (data[i] > max_val) max_val = data[i];
-        }
-
-        // 3. exp(x - max) и сумма
-        std::vector<float> exp_vals(vocab_size);
-        float sum_exp = 0.0f;
-        for (size_t i = 0; i < vocab_size; i++) {
-            exp_vals[i] = std::exp(data[i] - max_val);
-            sum_exp += exp_vals[i];
-        }
-
-        // 4. Softmax
-        softmax_output_.resize(vocab_size);
-        for (size_t i = 0; i < vocab_size; i++) {
-            softmax_output_[i] = exp_vals[i] / sum_exp;
-        }
-
-        // 5. Loss = -log(softmax[target])
-        float loss_value = -std::log(softmax_output_[target]);
-        return Tensor({1, 1}, loss_value);
-    }
-
-    // backward: возвращает градиент для logits (3D)
-    Tensor backward() {
-        size_t vocab_size = logits_.GetShape()[2];
-
-        // Градиент для last_logits (softmax - 1 для target)
-        Tensor grad_last_logits({vocab_size});
-        float* grad_data = grad_last_logits.Data();
-
-        for (size_t i = 0; i < vocab_size; i++) {
-            grad_data[i] = softmax_output_[i];
-        }
-        grad_data[target_] -= 1.0f;
-
-        // Создаём градиент для всего logits (3D)
-        Tensor grad_logits(logits_.GetShape());
-        float* grad_logits_data = grad_logits.Data();
-
-        // Заполняем нулями
-        for (size_t i = 0; i < grad_logits.GetSize(); i++) {
-            grad_logits_data[i] = 0.0f;
-        }
-
-        // Копируем градиент в нужную позицию (pos)
-        for (size_t i = 0; i < vocab_size; i++) {
-            grad_logits.at({0, pos_, i}) = grad_data[i];
-        }
-
-        return grad_logits;
-    }
-};
-
-std::vector<int> PrepareBatch(const std::string& text, BPETokenizer& tokenizer) {
-    std::vector<size_t> ids = tokenizer.Encode(text);
     std::vector<int> tokens;
+
     for (size_t id : ids) {
-        tokens.push_back(static_cast<int>(id));
+        tokens.push_back(
+            static_cast<int>(id)
+        );
     }
+
     return tokens;
 }
 
-void PrintTokens(const std::vector<size_t>& tokens, BPETokenizer& tokenizer) {
+
+// ============================================================
+// Print tokens
+// ============================================================
+
+void PrintTokens(
+    const std::vector<size_t>& tokens,
+    BPETokenizer& tokenizer
+) {
     std::vector<size_t> ids;
-    for (int t : tokens) ids.push_back(static_cast<size_t>(t));
-    std::cout << tokenizer.Decode(ids) << std::endl;
-}
 
-// --- Главный тест ---
-
-int main() {
-    std::cout << "=== Training & Generation Test ===\n\n";
-
-    using Clock = std::chrono::high_resolution_clock;
-
-    // ============================================================
-    // 1. Токенизатор
-    // ============================================================
-
-    BPETokenizer tokenizer;
-
-    std::string corpus =
-        "hello world hello world hello world";
-
-    tokenizer.Train(corpus, 50);
-    tokenizer.Save("vocab.txt");
-
-    std::cout
-        << "Vocabulary size: "
-        << tokenizer.GetVocabSize()
-        << "\n\n";
-
-
-    // ============================================================
-    // 2. Создаём модель
-    // ============================================================
-
-    size_t vocab_size =
-        tokenizer.GetVocabSize();
-
-    size_t embed_dim = 16;
-    size_t num_blocks = 2;
-    size_t num_heads = 2;
-    size_t hidden_dim = 32;
-
-    float learning_rate = 0.01f;
-    int epochs = 1000;
-
-    LanguageModel model(
-        vocab_size,
-        embed_dim,
-        num_blocks,
-        num_heads,
-        hidden_dim
-    );
-
-    std::cout
-        << "Model created\n\n";
-
-
-    // ============================================================
-    // 3. Подготовка данных
-    // ============================================================
-
-    std::vector<int> tokens =
-        PrepareBatch(
-            "hello world",
-            tokenizer
-        );
-
-    std::cout << "Tokens: ";
-
-    for (int t : tokens) {
-        std::cout << t << " ";
+    for (size_t t : tokens) {
+        ids.push_back(t);
     }
 
-    std::cout << "\n\n";
-
-
-    // ============================================================
-    // 4. Training
-    // ============================================================
-
     std::cout
-        << "Training started...\n\n";
-
-    CrossEntropyLoss loss_fn;
-
-    model.SetUseKVCache(false);
+        << tokenizer.Decode(ids)
+        << std::endl;
+}
 
 
-    // ------------------------------------------------------------
-    // Общая статистика
-    // ------------------------------------------------------------
+// ============================================================
+// MAIN
+// ============================================================
 
-    double total_forward_ms = 0.0;
-    double total_loss_ms = 0.0;
-    double total_backward_ms = 0.0;
-    double total_update_ms = 0.0;
-    double total_step_ms = 0.0;
+int main() {
+    try {
 
-    size_t total_steps = 0;
+        std::cout
+            << "=== CUDA Training & Generation Test ===\n\n";
 
-
-    auto training_start =
-        Clock::now();
+        using Clock =
+            std::chrono::high_resolution_clock;
 
 
-    for (int epoch = 0; epoch < epochs; epoch++) {
+        // ====================================================
+        // CUDA DEVICE
+        // ====================================================
 
-        float total_loss = 0.0f;
+        int device_count = 0;
 
-        double epoch_forward_ms = 0.0;
-        double epoch_loss_ms = 0.0;
-        double epoch_backward_ms = 0.0;
-        double epoch_update_ms = 0.0;
-        double epoch_total_ms = 0.0;
+        CheckCUDA(
+            cudaGetDeviceCount(&device_count),
+            "cudaGetDeviceCount"
+        );
+
+        if (device_count == 0) {
+            throw std::runtime_error(
+                "No CUDA devices found"
+            );
+        }
+
+        cudaDeviceProp prop{};
+
+        CheckCUDA(
+            cudaGetDeviceProperties(
+                &prop,
+                0
+            ),
+            "cudaGetDeviceProperties"
+        );
+
+        std::cout
+            << "CUDA device: "
+            << prop.name
+            << "\n";
+
+        std::cout
+            << "VRAM: "
+            << static_cast<double>(
+                prop.totalGlobalMem
+            ) / (1024.0 * 1024.0)
+            << " MB\n\n";
 
 
-        auto epoch_start =
+        // ====================================================
+        // TOKENIZER
+        // ====================================================
+
+        BPETokenizer tokenizer;
+
+        std::string corpus =
+            "hello world hello world hello world";
+
+        tokenizer.Train(
+            corpus,
+            50
+        );
+
+        tokenizer.Save(
+            "vocab.txt"
+        );
+
+        std::cout
+            << "Vocabulary size: "
+            << tokenizer.GetVocabSize()
+            << "\n\n";
+
+
+        // ====================================================
+        // MODEL
+        // ====================================================
+
+        size_t vocab_size =
+            tokenizer.GetVocabSize();
+
+        size_t embed_dim = 16;
+        size_t num_blocks = 2;
+        size_t num_heads = 2;
+        size_t hidden_dim = 32;
+
+        float learning_rate = 0.01f;
+
+        int epochs = 1000;
+
+        LanguageModel model(
+            vocab_size,
+            embed_dim,
+            num_blocks,
+            num_heads,
+            hidden_dim,
+            Device::CUDA
+        );
+
+        std::cout
+            << "Model created on CUDA\n\n";
+
+
+        // ====================================================
+        // DATA
+        // ====================================================
+
+        std::vector<int> tokens =
+            PrepareBatch(
+                "hello world",
+                tokenizer
+            );
+
+        std::cout
+            << "Tokens: ";
+
+        for (int token : tokens) {
+            std::cout
+                << token
+                << " ";
+        }
+
+        std::cout << "\n\n";
+
+        if (tokens.size() < 2) {
+            throw std::runtime_error(
+                "Not enough tokens for training"
+            );
+        }
+
+
+        // ====================================================
+        // LOSS
+        // ====================================================
+
+        CrossEntropyLoss loss_fn;
+
+
+        // ====================================================
+        // TRAINING
+        // ====================================================
+
+        std::cout
+            << "========================================\n";
+        std::cout
+            << "        CUDA TRAINING\n";
+        std::cout
+            << "========================================\n\n";
+
+        model.SetUseKVCache(false);
+
+
+        double total_forward_ms = 0.0;
+        double total_loss_ms = 0.0;
+        double total_backward_ms = 0.0;
+        double total_update_ms = 0.0;
+        double total_step_ms = 0.0;
+
+        size_t total_steps = 0;
+
+        auto training_start =
             Clock::now();
 
 
-        for (size_t i = 0;
-             i < tokens.size() - 1;
-             i++) {
+        for (int epoch = 0;
+             epoch < epochs;
+             epoch++) {
 
-            auto step_start =
+            float total_loss = 0.0f;
+
+            double epoch_forward_ms = 0.0;
+            double epoch_loss_ms = 0.0;
+            double epoch_backward_ms = 0.0;
+            double epoch_update_ms = 0.0;
+            double epoch_total_ms = 0.0;
+
+
+            auto epoch_start =
                 Clock::now();
 
 
-            // ====================================================
-            // Reset cache
-            // ====================================================
+            // ------------------------------------------------
+            // Каждая позиция является отдельным training step
+            // ------------------------------------------------
 
-            model.ResetCache();
+            for (size_t i = 0;
+                 i < tokens.size() - 1;
+                 i++) {
+
+                auto step_start =
+                    Clock::now();
 
 
-            // ====================================================
-            // Prepare prefix
-            // ====================================================
+                // ============================================
+                // RESET CACHE
+                // ============================================
 
-            std::vector<int> prefix(
-                tokens.begin(),
-                tokens.begin() + i + 1
-            );
+                model.ResetCache();
 
-            auto input =
-                std::make_shared<Tensor>(
-                    Tensor({1, prefix.size()})
+
+                // ============================================
+                // INPUT
+                //
+                // Например:
+                //
+                // i = 0
+                // input  = [hello]
+                //
+                // i = 1
+                // input  = [hello world]
+                //
+                // ============================================
+
+                size_t seq_len = i + 1;
+
+                std::vector<float> host_input(
+                    seq_len
                 );
 
-            for (size_t j = 0;
-                 j < prefix.size();
-                 j++) {
+                for (size_t j = 0;
+                     j < seq_len;
+                     j++) {
 
-                input->at({0, j}) =
-                    static_cast<float>(prefix[j]);
+                    host_input[j] =
+                        static_cast<float>(
+                            tokens[j]
+                        );
+                }
+
+                Tensor input =
+                    MakeCudaTensor(
+                        {1, seq_len},
+                        host_input
+                    );
+
+                auto input_ptr =
+                    std::make_shared<Tensor>(
+                        std::move(input)
+                    );
+
+
+                // ============================================
+                // TARGETS
+                //
+                // Для:
+                //
+                // input  = [hello world]
+                //
+                // target = [world ?]
+                //
+                // Но CE работает по всей последовательности,
+                // поэтому делаем target для каждой позиции.
+                //
+                // Здесь последний target известен точно.
+                //
+                // ============================================
+
+                std::vector<float> host_targets(
+                    seq_len
+                );
+
+                for (size_t j = 0;
+                     j < seq_len;
+                     j++) {
+
+                    size_t target_index =
+                        std::min(
+                            j + 1,
+                            tokens.size() - 1
+                        );
+
+                    host_targets[j] =
+                        static_cast<float>(
+                            tokens[target_index]
+                        );
+                }
+
+                Tensor targets =
+                    MakeCudaTensor(
+                        {1, seq_len},
+                        host_targets
+                    );
+
+
+                // ============================================
+                // FORWARD
+                // ============================================
+
+                auto forward_start =
+                    Clock::now();
+
+                auto logits_ptr =
+                    model.forward(
+                        input_ptr
+                    );
+
+                CheckTensorCUDA(
+                    *logits_ptr,
+                    "training logits"
+                );
+
+                CheckCUDA(
+                    cudaDeviceSynchronize(),
+                    "forward cudaDeviceSynchronize"
+                );
+
+                auto forward_end =
+                    Clock::now();
+
+                double forward_ms =
+                    std::chrono::duration<
+                        double,
+                        std::milli
+                    >(
+                        forward_end -
+                        forward_start
+                    ).count();
+
+                epoch_forward_ms +=
+                    forward_ms;
+
+                total_forward_ms +=
+                    forward_ms;
+
+
+                // ============================================
+                // LOSS
+                // ============================================
+
+                auto loss_start =
+                    Clock::now();
+
+                Tensor loss =
+                    loss_fn.forward(
+                        *logits_ptr,
+                        targets
+                    );
+
+                CheckTensorCUDA(
+                    loss,
+                    "loss"
+                );
+
+                CheckCUDA(
+                    cudaDeviceSynchronize(),
+                    "loss cudaDeviceSynchronize"
+                );
+
+                float loss_value =
+                    GetCudaScalar(loss);
+
+                auto loss_end =
+                    Clock::now();
+
+                double loss_ms =
+                    std::chrono::duration<
+                        double,
+                        std::milli
+                    >(
+                        loss_end -
+                        loss_start
+                    ).count();
+
+                epoch_loss_ms +=
+                    loss_ms;
+
+                total_loss_ms +=
+                    loss_ms;
+
+                total_loss +=
+                    loss_value;
+
+
+                // ============================================
+                // BACKWARD
+                // ============================================
+
+                auto backward_start =
+                    Clock::now();
+
+                Tensor grad_logits =
+                    loss_fn.backward();
+
+                CheckTensorCUDA(
+                    grad_logits,
+                    "grad_logits"
+                );
+
+                logits_ptr->backward(
+                    grad_logits
+                );
+
+                CheckCUDA(
+                    cudaDeviceSynchronize(),
+                    "backward cudaDeviceSynchronize"
+                );
+
+                auto backward_end =
+                    Clock::now();
+
+                double backward_ms =
+                    std::chrono::duration<
+                        double,
+                        std::milli
+                    >(
+                        backward_end -
+                        backward_start
+                    ).count();
+
+                epoch_backward_ms +=
+                    backward_ms;
+
+                total_backward_ms +=
+                    backward_ms;
+
+
+                // ============================================
+                // UPDATE
+                // ============================================
+
+                auto update_start =
+                    Clock::now();
+
+                model.Update(
+                    learning_rate
+                );
+
+                CheckCUDA(
+                    cudaDeviceSynchronize(),
+                    "update cudaDeviceSynchronize"
+                );
+
+                model.ClearGrad();
+
+                auto update_end =
+                    Clock::now();
+
+                double update_ms =
+                    std::chrono::duration<
+                        double,
+                        std::milli
+                    >(
+                        update_end -
+                        update_start
+                    ).count();
+
+                epoch_update_ms +=
+                    update_ms;
+
+                total_update_ms +=
+                    update_ms;
+
+
+                // ============================================
+                // STEP TOTAL
+                // ============================================
+
+                auto step_end =
+                    Clock::now();
+
+                double step_ms =
+                    std::chrono::duration<
+                        double,
+                        std::milli
+                    >(
+                        step_end -
+                        step_start
+                    ).count();
+
+                epoch_total_ms +=
+                    step_ms;
+
+                total_step_ms +=
+                    step_ms;
+
+                total_steps++;
             }
 
 
-            // ====================================================
-            // FORWARD
-            // ====================================================
-
-            auto forward_start =
+            auto epoch_end =
                 Clock::now();
 
-            auto logits_ptr =
-                model.forward(input);
-
-            auto forward_end =
-                Clock::now();
-
-
-            double forward_ms =
-                std::chrono::duration<double, std::milli>(
-                    forward_end - forward_start
+            double real_epoch_ms =
+                std::chrono::duration<
+                    double,
+                    std::milli
+                >(
+                    epoch_end -
+                    epoch_start
                 ).count();
 
 
-            epoch_forward_ms += forward_ms;
-            total_forward_ms += forward_ms;
+            // =================================================
+            // LOGGING
+            // =================================================
 
+            if (
+                epoch % 100 == 0 ||
+                epoch == epochs - 1
+            ) {
 
-            Tensor& logits =
-                *logits_ptr;
+                double steps_per_second =
+                    epoch_total_ms > 0.0
+                        ? static_cast<double>(
+                              tokens.size() - 1
+                          ) /
+                          (
+                              epoch_total_ms /
+                              1000.0
+                          )
+                        : 0.0;
 
+                std::cout
+                    << "Epoch "
+                    << std::setw(4)
+                    << epoch
+                    << " | Loss: "
+                    << std::fixed
+                    << std::setprecision(6)
+                    << total_loss /
+                       static_cast<float>(
+                           tokens.size() - 1
+                       )
+                    << "\n";
 
-            // ====================================================
-            // LOSS
-            // ====================================================
+                std::cout
+                    << "    Forward : "
+                    << std::setprecision(3)
+                    << epoch_forward_ms
+                    << " ms\n";
 
-            auto loss_start =
-                Clock::now();
+                std::cout
+                    << "    Loss    : "
+                    << epoch_loss_ms
+                    << " ms\n";
 
-            Tensor loss =
-                loss_fn.forward(
-                    logits,
-                    prefix.size() - 1,
-                    tokens[i + 1]
-                );
+                std::cout
+                    << "    Backward: "
+                    << epoch_backward_ms
+                    << " ms\n";
 
-            auto loss_end =
-                Clock::now();
+                std::cout
+                    << "    Update  : "
+                    << epoch_update_ms
+                    << " ms\n";
 
+                std::cout
+                    << "    Total   : "
+                    << real_epoch_ms
+                    << " ms\n";
 
-            double loss_ms =
-                std::chrono::duration<double, std::milli>(
-                    loss_end - loss_start
-                ).count();
-
-
-            epoch_loss_ms += loss_ms;
-            total_loss_ms += loss_ms;
-
-
-            total_loss +=
-                loss.at(0);
-
-
-            // ====================================================
-            // BACKWARD
-            // ====================================================
-
-            auto backward_start =
-                Clock::now();
-
-            Tensor grad_logits =
-                loss_fn.backward();
-
-            logits.backward(
-                grad_logits
-            );
-
-            auto backward_end =
-                Clock::now();
-
-
-            double backward_ms =
-                std::chrono::duration<double, std::milli>(
-                    backward_end - backward_start
-                ).count();
-
-
-            epoch_backward_ms += backward_ms;
-            total_backward_ms += backward_ms;
-
-
-            // ====================================================
-            // UPDATE
-            // ====================================================
-
-            auto update_start =
-                Clock::now();
-
-            model.Update(
-                learning_rate
-            );
-
-            model.ClearGrad();
-
-            auto update_end =
-                Clock::now();
-
-
-            double update_ms =
-                std::chrono::duration<double, std::milli>(
-                    update_end - update_start
-                ).count();
-
-
-            epoch_update_ms += update_ms;
-            total_update_ms += update_ms;
-
-
-            // ====================================================
-            // STEP TOTAL
-            // ====================================================
-
-            auto step_end =
-                Clock::now();
-
-            double step_ms =
-                std::chrono::duration<double, std::milli>(
-                    step_end - step_start
-                ).count();
-
-
-            epoch_total_ms += step_ms;
-            total_step_ms += step_ms;
-
-            total_steps++;
+                std::cout
+                    << "    Steps/s : "
+                    << steps_per_second
+                    << "\n\n";
+            }
         }
 
 
-        auto epoch_end =
+        auto training_end =
             Clock::now();
 
-
-        double real_epoch_ms =
-            std::chrono::duration<double, std::milli>(
-                epoch_end - epoch_start
+        double training_ms =
+            std::chrono::duration<
+                double,
+                std::milli
+            >(
+                training_end -
+                training_start
             ).count();
 
 
-        // ========================================================
-        // Logging
-        // ========================================================
+        // ====================================================
+        // PROFILE
+        // ====================================================
 
-        if (epoch % 100 == 0 ||
-            epoch == epochs - 1) {
+        std::cout << "\n";
+        std::cout
+            << "========================================\n";
+        std::cout
+            << "        CUDA TRAINING PROFILE\n";
+        std::cout
+            << "========================================\n";
 
-            double steps_per_second =
-                (epoch_total_ms > 0.0)
-                    ? (tokens.size() - 1) /
-                      (epoch_total_ms / 1000.0)
-                    : 0.0;
+        std::cout
+            << "Total training time: "
+            << training_ms / 1000.0
+            << " s\n";
 
-            std::cout
-                << "Epoch "
-                << std::setw(4)
-                << epoch
-                << " | Loss: "
-                << total_loss /
-                   static_cast<float>(tokens.size() - 1)
-                << "\n";
+        std::cout
+            << "Total steps: "
+            << total_steps
+            << "\n\n";
 
-            std::cout
-                << "    Forward : "
-                << std::fixed
-                << std::setprecision(3)
-                << epoch_forward_ms
-                << " ms\n";
+        std::cout
+            << "Forward total : "
+            << total_forward_ms
+            << " ms\n";
 
-            std::cout
-                << "    Loss    : "
-                << epoch_loss_ms
-                << " ms\n";
+        std::cout
+            << "Loss total    : "
+            << total_loss_ms
+            << " ms\n";
 
-            std::cout
-                << "    Backward: "
-                << epoch_backward_ms
-                << " ms\n";
+        std::cout
+            << "Backward total: "
+            << total_backward_ms
+            << " ms\n";
 
-            std::cout
-                << "    Update  : "
-                << epoch_update_ms
-                << " ms\n";
+        std::cout
+            << "Update total  : "
+            << total_update_ms
+            << " ms\n";
 
-            std::cout
-                << "    Total   : "
-                << real_epoch_ms
-                << " ms\n";
+        std::cout
+            << "Step total    : "
+            << total_step_ms
+            << " ms\n";
 
-            std::cout
-                << "    Steps/s : "
-                << steps_per_second
-                << "\n";
+
+        if (total_step_ms > 0.0) {
+
+            std::cout << "\n";
 
             std::cout
-                << "\n";
+                << "Forward share : "
+                << total_forward_ms /
+                   total_step_ms *
+                   100.0
+                << " %\n";
+
+            std::cout
+                << "Loss share    : "
+                << total_loss_ms /
+                   total_step_ms *
+                   100.0
+                << " %\n";
+
+            std::cout
+                << "Backward share: "
+                << total_backward_ms /
+                   total_step_ms *
+                   100.0
+                << " %\n";
+
+            std::cout
+                << "Update share  : "
+                << total_update_ms /
+                   total_step_ms *
+                   100.0
+                << " %\n";
         }
-    }
 
-
-    auto training_end =
-        Clock::now();
-
-
-    double training_ms =
-        std::chrono::duration<double, std::milli>(
-            training_end - training_start
-        ).count();
-
-
-    // ============================================================
-    // 5. FINAL PROFILE
-    // ============================================================
-
-    std::cout << "\n";
-    std::cout
-        << "========================================\n";
-
-    std::cout
-        << "        TRAINING PROFILE\n";
-
-    std::cout
-        << "========================================\n";
-
-    std::cout
-        << "Total training time: "
-        << training_ms / 1000.0
-        << " s\n";
-
-    std::cout
-        << "Total steps: "
-        << total_steps
-        << "\n\n";
-
-
-    std::cout
-        << "Forward total : "
-        << total_forward_ms
-        << " ms\n";
-
-    std::cout
-        << "Loss total    : "
-        << total_loss_ms
-        << " ms\n";
-
-    std::cout
-        << "Backward total: "
-        << total_backward_ms
-        << " ms\n";
-
-    std::cout
-        << "Update total  : "
-        << total_update_ms
-        << " ms\n";
-
-    std::cout
-        << "Step total    : "
-        << total_step_ms
-        << " ms\n";
-
-
-    // ============================================================
-    // Percentages
-    // ============================================================
-
-    if (total_step_ms > 0.0) {
+        double steps_per_second =
+            total_steps /
+            (training_ms / 1000.0);
 
         std::cout << "\n";
 
         std::cout
-            << "Forward share : "
-            << total_forward_ms /
-               total_step_ms * 100.0
-            << " %\n";
+            << "Steps/sec : "
+            << steps_per_second
+            << "\n";
 
         std::cout
-            << "Loss share    : "
-            << total_loss_ms /
-               total_step_ms * 100.0
-            << " %\n";
+            << "Tokens/sec: "
+            << steps_per_second
+            << "\n";
 
         std::cout
-            << "Backward share: "
-            << total_backward_ms /
-               total_step_ms * 100.0
-            << " %\n";
-
-        std::cout
-            << "Update share  : "
-            << total_update_ms /
-               total_step_ms * 100.0
-            << " %\n";
-    }
+            << "========================================\n";
 
 
-    double steps_per_second =
-        total_steps /
-        (training_ms / 1000.0);
+        // ====================================================
+        // PREDICTIONS
+        // ====================================================
 
-
-    double tokens_per_second =
-        total_steps /
-        (training_ms / 1000.0);
-
-
-    std::cout << "\n";
-
-    std::cout
-        << "Steps/sec : "
-        << steps_per_second
-        << "\n";
-
-    std::cout
-        << "Tokens/sec: "
-        << tokens_per_second
-        << "\n";
-
-    std::cout
-        << "========================================\n";
-
-
-    // ============================================================
-    // 6. Prediction
-    // ============================================================
-
-    TestPredictions(
-        model,
-        tokens
-    );
-
-
-    // ============================================================
-    // 7. KV-cache test
-    // ============================================================
-
-    std::vector<int> test_tokens = {
-        7, 4, 11, 11, 14,
-        22, 14, 17, 11, 3
-    };
-
-    TestFullVsKVCache(
-        model,
-        test_tokens
-    );
-
-
-    // ============================================================
-    // 8. Generation
-    // ============================================================
-
-    std::cout
-        << "\n=== Generation ===\n";
-
-    model.ResetCache();
-
-    size_t start_token =
-        tokens[0];
-
-    int end_token_id = -1;
-    int max_len = 20;
-
-    float temperature = 1.0f;
-    float top_p = 0.0f;
-
-
-    std::cout
-        << "Generating with greedy sample:\n";
-
-
-    std::vector<size_t> generated =
-        model.generate(
-            {start_token},
-            max_len,
-            temperature,
-            top_p,
-            end_token_id
+        TestPredictions(
+            model,
+            tokens
         );
 
 
-    std::cout
-        << "Tokens: ";
+        // ====================================================
+        // KV CACHE
+        // ====================================================
 
-    for (size_t t : generated) {
+        std::vector<int> test_tokens = {
+            7, 4, 11, 11, 14,
+            22, 14, 17, 11, 3
+        };
+
+        TestFullVsKVCache(
+            model,
+            test_tokens
+        );
+
+
+        // ====================================================
+        // GENERATION
+        // ====================================================
+
         std::cout
-            << t
-            << " ";
+            << "\n=== CUDA Generation ===\n";
+
+        model.SetUseKVCache(true);
+        model.ResetCache();
+
+        size_t start_token =
+            static_cast<size_t>(
+                tokens[0]
+            );
+
+        int end_token_id = -1;
+
+        int max_len = 20;
+
+        float temperature = 1.0f;
+
+        float top_p = 0.0f;
+
+        std::cout
+            << "Generating with greedy sample:\n";
+
+        std::vector<size_t> generated =
+            model.generate(
+                {start_token},
+                max_len,
+                temperature,
+                top_p,
+                end_token_id
+            );
+
+        std::cout
+            << "Tokens: ";
+
+        for (size_t t : generated) {
+            std::cout
+                << t
+                << " ";
+        }
+
+        std::cout << "\n";
+
+        std::cout
+            << "Text: ";
+
+        PrintTokens(
+            generated,
+            tokenizer
+        );
+
+        std::cout << "\n";
+
+        model.SetUseKVCache(false);
+        model.ResetCache();
+
+
+        std::cout
+            << "=== CUDA test completed ===\n";
+
+
+        return 0;
+
+    } catch (const std::exception& e) {
+
+        std::cerr
+            << "\n========================================\n";
+        std::cerr
+            << "CUDA TEST FAILED\n";
+        std::cerr
+            << "========================================\n";
+        std::cerr
+            << e.what()
+            << "\n";
+
+        cudaDeviceSynchronize();
+
+        return 1;
     }
-
-    std::cout << "\n";
-
-
-    std::cout
-        << "Text: ";
-
-    PrintTokens(
-        generated,
-        tokenizer
-    );
-
-    std::cout << "\n";
-
-
-    std::cout
-        << "=== Test completed ===\n";
-
-
-    return 0;
 }

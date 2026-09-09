@@ -1,5 +1,6 @@
 #include "language_model.h"
 #include "../Tensor/tensor.h"
+#include "../Tensor/device.h"
 #include <vector>
 #include <memory>
 #include <algorithm>
@@ -27,11 +28,12 @@ struct ScopedTimer {
 };
 }
 
-LanguageModel::LanguageModel(size_t vocab_size, size_t embed_dim, size_t num_blocks, 
-        size_t num_heads, size_t hidden_dim) : vocab_size_(vocab_size),
-      embedding_(vocab_size, embed_dim),
-      transformer_(num_blocks, embed_dim, num_heads, hidden_dim),
-      lm_head_(embed_dim, vocab_size),
+LanguageModel::LanguageModel(size_t vocab_size, size_t embed_dim, size_t num_blocks,
+    size_t num_heads, size_t hidden_dim, Device device) : vocab_size_(vocab_size),
+      device_(device),
+      embedding_(vocab_size, embed_dim, device),
+      transformer_(num_blocks, embed_dim, num_heads, hidden_dim, device),
+      lm_head_(embed_dim, vocab_size, device),
       gen_(std::random_device{}()) {}
 
 

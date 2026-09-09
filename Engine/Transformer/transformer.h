@@ -1,6 +1,7 @@
 #pragma once
 
 #include "transformer_block.h"
+#include "../Tensor/device.h"
 #include <vector>
 #include <memory>
 
@@ -12,7 +13,7 @@ private:
 public:
     Transformer() = default;
 
-    Transformer(size_t n,size_t embed_dim,size_t num_heads,size_t hidden_dim);
+    Transformer(size_t n, size_t embed_dim, size_t num_heads, size_t hidden_dim, Device device = Device::CPU);
     std::shared_ptr<Tensor> forward(const std::shared_ptr<Tensor>& x);
 
     void Update(float lr);

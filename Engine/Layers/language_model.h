@@ -2,11 +2,13 @@
 #include "../Transformer/transformer.h"
 #include "embedding_layer.h"
 #include "../Tensor/tensor.h"
+#include "../Tensor/device.h"
 #include "linear_layer.h"
 #include <vector>
 
 class LanguageModel {
 private:
+    std::mt19937 gen_;
     EmbeddingLayer embedding_;
     Transformer transformer_;
     LinearLayer lm_head_;
@@ -15,9 +17,11 @@ private:
 
     std::mt19937 gen_;
 
+    Device device_;
+
 public:
-    LanguageModel(size_t vocab_size, size_t embed_dim, size_t num_blocks, 
-        size_t num_heads, size_t hidden_dim);
+    LanguageModel(size_t vocab_size, size_t embed_dim, size_t num_blocks,
+        size_t num_heads, size_t hidden_dim, Device device = Device::CPU);
     std::shared_ptr<Tensor> forward(const std::shared_ptr<Tensor>& tokens);
     std::vector<size_t> generate(const std::vector<size_t>& prompt,
         int max_len, float temperature, float top_p, int end_token_id);

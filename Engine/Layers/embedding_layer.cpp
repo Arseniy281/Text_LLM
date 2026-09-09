@@ -5,13 +5,11 @@
 #include <memory>
 #include <stdexcept>
 
-EmbeddingLayer::EmbeddingLayer(size_t vocab_size, size_t embedding_dim)
-    : vocab_size_(vocab_size), embedding_dim_(embedding_dim) {
-
-    embeddings_ = Tensor::Random({vocab_size_, embedding_dim_});
-    grad_ = std::make_shared<Tensor>(
-        Tensor({vocab_size_, embedding_dim_}, 0.0f));
-}
+EmbeddingLayer::EmbeddingLayer(size_t vocab_size, size_t embedding_dim, Device device)
+        : vocab_size_(vocab_size),
+      embedding_dim_(embedding_dim),
+      embeddings_({vocab_size, embedding_dim}, device),
+      grad_(nullptr) {}
 
 
 std::shared_ptr<Tensor> EmbeddingLayer::forward(const std::shared_ptr<Tensor>& indices) {

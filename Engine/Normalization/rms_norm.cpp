@@ -1,9 +1,14 @@
 #include "rms_norm.h"
 #include "../Autograd/rms_norm_op.h"
+#include "../Tensor/device.h"
 
-RMSNorm::RMSNorm(size_t embed_dim) {
-    gamma_ = std::make_shared<Tensor>(Tensor({embed_dim}, 1.0f));
-}
+
+RMSNorm::RMSNorm(size_t embed_dim, Device device)
+    : gamma_(std::make_shared<Tensor>(
+        std::vector<size_t>{embed_dim},
+        1.0f,
+        device
+    )) {}
 
 std::shared_ptr<Tensor> RMSNorm::forward(
     const std::shared_ptr<Tensor>& x

@@ -13,24 +13,20 @@
 #include <sys/stat.h>
 #include <errno.h> 
 #include <chrono>
+#include "../Tensor/device.h"
 
-MultiHeadAttention::MultiHeadAttention(size_t embed_dim, size_t num_heads) 
-    : embed_dim_(embed_dim), num_heads_(num_heads), 
-      is_first_token_(true), use_kv_cache_(false) {
-    head_dim_ = embed_dim_ / num_heads_;
-    softmax_.resize(num_heads_);
-    
-    q_layers_.reserve(num_heads_);
-    k_layers_.reserve(num_heads_);
-    v_layers_.reserve(num_heads_);
-    
-    for (size_t i = 0; i < num_heads_; i++) {
-        q_layers_.emplace_back(embed_dim_, head_dim_);
-        k_layers_.emplace_back(embed_dim_, head_dim_);
-        v_layers_.emplace_back(embed_dim_, head_dim_);
+MultiHeadAttention::MultiHeadAttention(size_t embed_dim, size_t num_heads, Device device)
+        : embed_dim_(embed_dim),
+      num_heads_(num_heads),
+      head_dim_(embed_dim / num_heads),
+      output_layer_(embed_dim, embed_dim, device) {
+
+    for (size_t i = 0; i < num_heads_; ++i) {
+        q_layers_.emplace_back(embed_dim_, head_dim_, device);
+        k_layers_.emplace_back(embed_dim_, head_dim_, device);
+        v_layers_.emplace_back(embed_dim_, head_dim_, device);
+        softmax_.emplace_back();
     }
-
-    output_layer_ = LinearLayer(embed_dim_, embed_dim_);
 }
 
 Tensor MultiHeadAttention::CreateCausalMask(size_t query_len, size_t key_len, size_t query_start, Device device) {

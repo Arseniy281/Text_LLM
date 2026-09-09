@@ -16,7 +16,7 @@ private:
     std::shared_ptr<Tensor> last_output_;
 
 public:
-    EmbeddingLayer(size_t vocab_size, size_t embedding_dim);
+    EmbeddingLayer(size_t vocab_size, size_t embedding_dim, Device device = Device::CPU);
 
     std::shared_ptr<Tensor> forward(
         const std::shared_ptr<Tensor>& indices

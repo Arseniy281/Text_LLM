@@ -3,37 +3,16 @@
 #include <sys/stat.h>
 #include <errno.h> 
 #include <vector>
+#include "../Tensor/device.h"
 
 #include <chrono>
 #include <iostream>
 
-TransformerBlock::TransformerBlock(size_t embed_dim, size_t num_heads, size_t hidden_dim)
-        : rms_norm_1_(embed_dim),
-          attention_(embed_dim, num_heads),
-          rms_norm_2_(embed_dim),
-          feed_forward_(embed_dim, hidden_dim) {}
-
-// std::shared_ptr<Tensor> TransformerBlock::forward(const Tensor& x) {
-//     auto input = std::make_shared<Tensor>(x);
-//     Tensor residual = x;
-    
-//     *input = rms_norm_1_.forward(*input);
-//     saved_norm_1_input_ = *input;
-//     input = attention_.forward(*input);
-//     saved_attention_input_ = *input;
-//     *input += residual;
-//     residual = *input;
-//     saved_residual_1_ = residual;
-    
-//     *input = rms_norm_2_.forward(*input);
-//     saved_norm_2_input_ = *input;
-//     *input = feed_forward_.forward(*input);
-//     saved_ffn_input_ = *input;
-//     *input += residual;
-//     saved_residual_2_ = residual;
-    
-//     return input;
-// }
+TransformerBlock::TransformerBlock(size_t embed_dim, size_t num_heads, size_t hidden_dim, Device device)
+    : rms_norm_1_(embed_dim, device),
+      attention_(embed_dim, num_heads, device),
+      rms_norm_2_(embed_dim, device),
+      feed_forward_(embed_dim, hidden_dim, device) {}
 
 std::shared_ptr<Tensor> TransformerBlock::forward(const std::shared_ptr<Tensor>& x) {
     auto start = std::chrono::steady_clock::now();

@@ -2,6 +2,7 @@
 #include <sys/stat.h>
 #include <chrono>
 #include <iostream>
+#include "../Tensor/device.h"
 
 namespace {
 struct ScopedTimer {
@@ -20,13 +21,16 @@ struct ScopedTimer {
 };
 }
 
-Transformer::Transformer(size_t n, size_t embed_dim, size_t num_heads, 
-        size_t hidden_dim) : blocks_count_(n) {
+Transformer::Transformer(size_t n, size_t embed_dim, size_t num_heads, size_t hidden_dim, Device device)
+        : blocks_count_(n) {
 
-    blocks_.reserve(n);
-
-    for (size_t i = 0; i < n; i++) {
-        blocks_.emplace_back(embed_dim, num_heads, hidden_dim);
+    for (size_t i = 0; i < n; ++i) {
+        blocks_.emplace_back(
+            embed_dim,
+            num_heads,
+            hidden_dim,
+            device
+        );
     }
 }
 

@@ -5,6 +5,7 @@
 #include <iostream>
 #include <memory>
 #include <vector>
+#include "../Tensor/device.h"
 
 class MultiHeadAttention {
 private:
@@ -41,7 +42,7 @@ private:
     std::shared_ptr<Tensor> forward_no_cache(const std::shared_ptr<Tensor>& x);
     std::shared_ptr<Tensor> forward_with_cache(const std::shared_ptr<Tensor>& x);
 public:
-    MultiHeadAttention(size_t embed_dim, size_t num_heads = 1);
+    MultiHeadAttention(size_t embed_dim, size_t num_heads = 1, Device device = Device::CPU);
 
     Tensor CreateCausalMask(size_t query_len, size_t key_len, size_t query_start, Device device);
     std::shared_ptr<Tensor> forward(const std::shared_ptr<Tensor>& x);
