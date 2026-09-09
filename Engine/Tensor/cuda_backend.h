@@ -4,6 +4,7 @@
 #include "backend.h"
 #include <memory>
 #include <vector>
+#include <cublas_v2.h>
 
 class CUDABackend : public Backend {
 private:
