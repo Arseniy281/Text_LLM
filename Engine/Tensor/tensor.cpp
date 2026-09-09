@@ -518,7 +518,6 @@ void Tensor::SetGrad(std::shared_ptr<Tensor> grad) {
 
 void Tensor::AddGrad(Tensor grad) {
 
-    // Первый градиент просто сохраняем.
     if (grad_ == nullptr) {
 
         grad_ =
@@ -530,65 +529,6 @@ void Tensor::AddGrad(Tensor grad) {
     }
 
     if (grad_->GetShape() != grad.GetShape()) {
-
-        std::cerr
-            << "\n========================================\n"
-            << "           GRADIENT SHAPE ERROR\n"
-            << "========================================\n";
-
-        std::cerr
-            << "Tensor shape      = [";
-
-        for (size_t i = 0;
-             i < shape_.size();
-             i++) {
-
-            if (i > 0) {
-                std::cerr << " ";
-            }
-
-            std::cerr << shape_[i];
-        }
-
-        std::cerr << "]\n";
-
-        std::cerr
-            << "Existing gradient = [";
-
-        for (size_t i = 0;
-             i < grad_->GetShape().size();
-             i++) {
-
-            if (i > 0) {
-                std::cerr << " ";
-            }
-
-            std::cerr
-                << grad_->GetShape()[i];
-        }
-
-        std::cerr << "]\n";
-
-        std::cerr
-            << "New gradient     = [";
-
-        for (size_t i = 0;
-             i < grad.GetShape().size();
-             i++) {
-
-            if (i > 0) {
-                std::cerr << " ";
-            }
-
-            std::cerr
-                << grad.GetShape()[i];
-        }
-
-        std::cerr << "]\n";
-
-        std::cerr
-            << "========================================\n";
-
         throw std::runtime_error(
             "Tensor::AddGrad: gradient shape mismatch"
         );
@@ -625,9 +565,6 @@ void Tensor::SetGradFn(std::shared_ptr<Operation> op) {
 }
 
 void Tensor::backward(const Tensor& grad_output) {
-
-    // std::cerr << "\n[TENSOR BACKWARD] START\n";
-
     if (grad_fn_ == nullptr) {
 
         throw std::runtime_error(
@@ -635,44 +572,16 @@ void Tensor::backward(const Tensor& grad_output) {
         );
     }
 
-    // std::cerr << "[TENSOR BACKWARD] grad_fn exists\n";
-
-    // ========================================
-    // Build backward graph
-    // ========================================
-
     std::vector<Tensor*> graph;
     std::unordered_set<Tensor*> visited;
-
-    // std::cerr
-    //     << "[TENSOR BACKWARD] BuildBackwardGraph START\n";
 
     BuildBackwardGraph(
         graph,
         visited
     );
 
-    // std::cerr
-    //     << "[TENSOR BACKWARD] BuildBackwardGraph OK"
-    //     << " | graph size = "
-    //     << graph.size()
-    //     << "\n";
-
-    // ========================================
-    // Initial gradient
-    // ========================================
-
-    // std::cerr
-    //     << "[TENSOR BACKWARD] Add initial grad START\n";
-
     AddGrad(grad_output);
 
-    // std::cerr
-    //     << "[TENSOR BACKWARD] Add initial grad OK\n";
-
-    // ========================================
-    // Backward pass
-    // ========================================
 
     size_t operation_index = 0;
 
@@ -683,8 +592,6 @@ void Tensor::backward(const Tensor& grad_output) {
         Tensor* tensor = *it;
 
         if (tensor == nullptr) {
-            // std::cerr
-            //     << "[TENSOR BACKWARD] NULL tensor!\n";
             continue;
         }
 
@@ -692,23 +599,10 @@ void Tensor::backward(const Tensor& grad_output) {
             continue;
         }
 
-        // std::cerr
-        //     << "\n[TENSOR BACKWARD] Operation #"
-        //     << operation_index
-        //     << "\n";
-
         operation_index++;
 
         const char* operation_name =
             tensor->grad_fn_->Name();
-
-        // std::cerr
-        //     << "  Operation: "
-        //     << operation_name
-        //     << "\n";
-
-        // std::cerr
-        //     << "  Tensor shape: [";
 
         for (size_t i = 0;
              i < tensor->shape_.size();
@@ -722,24 +616,7 @@ void Tensor::backward(const Tensor& grad_output) {
                 << tensor->shape_[i];
         }
 
-        // std::cerr << "]\n";
-
-        // std::cerr
-        //     << "  Tensor device: "
-        //     << (tensor->device_ == Device::CUDA
-        //         ? "CUDA"
-        //         : "CPU")
-        //     << "\n";
-
-        // ====================================
-        // Проверяем gradient
-        // ====================================
-
         if (tensor->grad_ == nullptr) {
-
-            // std::cerr
-            //     << "  ERROR: tensor->grad_ == nullptr\n";
-
             throw std::runtime_error(
                 std::string(
                     "Tensor::backward: missing gradient for operation "
@@ -747,106 +624,22 @@ void Tensor::backward(const Tensor& grad_output) {
             );
         }
 
-        // std::cerr
-        //     << "  Gradient shape: [";
-
-        // for (size_t i = 0;
-        //      i < tensor->grad_->GetShape().size();
-        //      ++i) {
-
-            // if (i > 0) {
-            //     std::cerr << ", ";
-            // }
-
-            // std::cerr
-            //     << tensor->grad_->GetShape()[i];
-        // }
-
-        // std::cerr << "]\n";
-
-        // std::cerr
-        //     << "  Gradient device: "
-        //     << (tensor->grad_->GetDevice() == Device::CUDA
-        //         ? "CUDA"
-        //         : "CPU")
-        //     << "\n";
-
-        // ====================================
-        // Get inputs
-        // ====================================
-
-        // std::cerr
-        //     << "  GetInputs START\n";
-
         std::vector<std::shared_ptr<Tensor>> inputs =
             tensor->grad_fn_->GetInputs();
-
-        // std::cerr
-        //     << "  GetInputs OK"
-        //     << " | inputs = "
-        //     << inputs.size()
-        //     << "\n";
 
         for (size_t i = 0;
              i < inputs.size();
              ++i) {
 
             if (inputs[i] == nullptr) {
-
-                // std::cerr
-                //     << "    input["
-                //     << i
-                //     << "] = nullptr\n";
-
                 continue;
             }
-
-            // std::cerr
-            //     << "    input["
-            //     << i
-            //     << "] shape = [";
-
-            // for (size_t j = 0;
-            //      j < inputs[i]->GetShape().size();
-            //      ++j) {
-
-            //     if (j > 0) {
-            //         std::cerr << ", ";
-            //     }
-
-            //     std::cerr
-            //         << inputs[i]->GetShape()[j];
-            // }
-
-            // std::cerr
-            //     << "] device = "
-            //     << (inputs[i]->GetDevice() == Device::CUDA
-            //         ? "CUDA"
-            //         : "CPU")
-            //     << "\n";
         }
-
-        // ====================================
-        // Operation backward
-        // ====================================
-
-        std::cerr
-            << "  Operation::backward START\n";
 
         std::vector<Tensor> gradients =
             tensor->grad_fn_->backward(
                 *tensor->grad_
             );
-
-        std::cerr
-            << "  Operation::backward OK"
-            << " | gradients = "
-            << gradients.size()
-            << "\n";
-
-        // ====================================
-        // Проверка количества
-        // ====================================
 
         if (gradients.size() != inputs.size()) {
 
@@ -856,10 +649,6 @@ void Tensor::backward(const Tensor& grad_output) {
             );
         }
 
-        // ====================================
-        // Передаём градиенты входам
-        // ====================================
-
         for (size_t i = 0;
              i < inputs.size();
              ++i) {
@@ -868,29 +657,11 @@ void Tensor::backward(const Tensor& grad_output) {
                 continue;
             }
 
-            std::cerr
-                << "    AddGrad input["
-                << i
-                << "] START\n";
-
             inputs[i]->AddGrad(
                 gradients[i]
             );
-
-            std::cerr
-                << "    AddGrad input["
-                << i
-                << "] OK\n";
         }
-
-        std::cerr
-            << "  Operation #"
-            << (operation_index - 1)
-            << " FINISHED\n";
     }
-
-    std::cerr
-        << "\n[TENSOR BACKWARD] FINISHED\n";
 }
 
 Tensor Tensor::SumAxis(int axis) const {
