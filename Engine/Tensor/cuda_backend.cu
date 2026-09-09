@@ -1,5 +1,3 @@
-#pragma once
-
 #include "../Tensor/tensor.h"
 #include "cuda_backend.h"
 #include <cublas_v2.h>
@@ -1359,7 +1357,7 @@ std::vector<Tensor> CUDABackend::RMSNormBackward(const Tensor& input, const Tens
     }
 
     Tensor grad_x(input_shape, Device::CUDA);
-    Tensor grad_gamma({embed_dim}, 0.0f);
+    Tensor grad_gamma({embed_dim}, 0.0f, Device::CUDA);
 
     const size_t rows = batch * seq_len;
     const size_t threads = 1;
