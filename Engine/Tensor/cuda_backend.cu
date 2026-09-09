@@ -2159,7 +2159,7 @@ Tensor CUDABackend::CrossEntropy(const Tensor& logits, const Tensor& targets) co
 
     float loss = sum / static_cast<float>(positions);
 
-    return Tensor({1, 1}, loss);
+    return Tensor({1, 1}, loss, Device::CUDA);
 }
 
 
