@@ -1348,7 +1348,7 @@ __global__ void RoPEForwardKernel(const float* input, float* output, size_t batc
 
     size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const size_t total = batch * seq_len * head_dim;
-    if (index >= total) { return }
+    if (index >= total) { return; }
 
     const size_t dim = index % head_dim;
     if (dim % 2 != 0) { return; }
