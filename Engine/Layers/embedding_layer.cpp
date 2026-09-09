@@ -13,11 +13,13 @@ EmbeddingLayer::EmbeddingLayer(
 )
     : vocab_size_(vocab_size),
       embedding_dim_(embedding_dim),
-      embeddings_(Tensor::Random(
-          {vocab_size, embedding_dim},
-          -0.1f,
-          0.1f
-      )),
+      embeddings_(
+          Tensor::Random(
+              {vocab_size, embedding_dim},
+              -0.1f,
+              0.1f
+          )
+      ),
       grad_(std::make_shared<Tensor>(
           std::vector<size_t>{vocab_size, embedding_dim},
           0.0f,
@@ -33,14 +35,7 @@ EmbeddingLayer::EmbeddingLayer(
 
         embeddings_ = Tensor(
             {vocab_size, embedding_dim},
-            Device::CUDA
-        );
-
-        cudaMemcpy(
-            embeddings_.data_,
-            cpu_embeddings.data_,
-            vocab_size * embedding_dim * sizeof(float),
-            cudaMemcpyHostToDevice
+            cpu_embeddings.GetData()
         );
     }
 }
