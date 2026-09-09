@@ -44,8 +44,30 @@ __global__ void DivKernel(const float* a, const float* b, float* result, size_t 
 
 Tensor CUDABackend::Add(const Tensor& a, const Tensor& b) const {
     if (a.GetShape() != b.GetShape()) {
-        throw std::runtime_error("CUDABackend::Add: shape mismatch");
+    std::cerr << "\nCUDABackend::Add shape mismatch:\n";
+
+    std::cerr << "A: [";
+    for (size_t i = 0; i < a.GetShape().size(); ++i) {
+        std::cerr << a.GetShape()[i];
+        if (i + 1 < a.GetShape().size()) {
+            std::cerr << ", ";
+        }
     }
+    std::cerr << "]\n";
+
+    std::cerr << "B: [";
+    for (size_t i = 0; i < b.GetShape().size(); ++i) {
+        std::cerr << b.GetShape()[i];
+        if (i + 1 < b.GetShape().size()) {
+            std::cerr << ", ";
+        }
+    }
+    std::cerr << "]\n";
+
+    throw std::runtime_error(
+        "CUDABackend::Add: shape mismatch"
+    );
+}
     size_t size = a.GetSize();
     Tensor result(a.GetShape(), Device::CUDA);
 
