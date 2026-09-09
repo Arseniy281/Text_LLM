@@ -1478,3 +1478,24 @@ size_t CPUBackend::ArgMax(const Tensor& tensor) const {
 
     return max_index;
 }
+
+Tensor CPUBackend::Reshape(const Tensor& input, const std::vector<size_t>& new_shape) const {
+    size_t old_size = input.GetSize();
+    size_t new_size = 1;
+
+    for (size_t dimension : new_shape) {
+        new_size *= dimension;
+    }
+
+    if (old_size != new_size) {
+        throw std::runtime_error("Reshape: incompatible tensor sizes");
+    }
+
+    Tensor result(new_shape);
+
+    for (size_t i = 0; i < old_size; ++i) {
+        result.data_[i] = input.data_[i];
+    }
+
+    return result;
+}

@@ -71,4 +71,5 @@ public:
     size_t ArgMax(const Tensor& tensor) const override;
     Tensor Sigmoid(const Tensor& input) const override;
     Tensor SigmoidBackward(const Tensor& input, const Tensor& grad_output) const override;
+    Tensor Reshape(const Tensor& input, const std::vector<size_t>& new_shape) const override;
 };

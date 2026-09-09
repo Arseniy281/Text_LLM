@@ -2255,3 +2255,27 @@ size_t CUDABackend::ArgMax(const Tensor& tensor) const {
 
     return max_index;
 }
+
+Tensor CUDABackend::Reshape(const Tensor& input, const std::vector<size_t>& new_shape) const {
+    size_t old_size = input.GetSize();
+    size_t new_size = 1;
+
+    for (size_t dimension : new_shape) {
+        new_size *= dimension;
+    }
+
+    if (old_size != new_size) {
+        throw std::runtime_error("Reshape: incompatible tensor sizes");
+    }
+
+    Tensor result(new_shape, Device::CUDA);
+
+    cudaMemcpy(
+        result.data_,
+        input.data_,
+        old_size * sizeof(float),
+        cudaMemcpyDeviceToDevice
+    );
+
+    return result;
+}

@@ -1,6 +1,7 @@
 #include "language_model.h"
 #include "../Tensor/tensor.h"
 #include "../Tensor/device.h"
+#include "../Autograd/reshape_op.h"
 #include <vector>
 #include <memory>
 #include <algorithm>
@@ -45,19 +46,17 @@ std::cout << "Embedding output grad_fn: "
           << (x->GradFn() != nullptr ? "YES" : "NO")
           << "\n";
 
-if (x->GetShape().size() == 2) {
-    x = std::make_shared<Tensor>(
-        x->Reshape({
-            1,
-            x->GetShape()[0],
-            x->GetShape()[1]
-        })
-    );
+    if (x->GetShape().size() == 2) {
+        auto reshape_op = std::make_shared<ReshapeOp>(
+            std::vector<size_t>{
+                1,
+                x->GetShape()[0],
+                x->GetShape()[1]
+            }
+        );
 
-    std::cout << "Reshaped tensor grad_fn: "
-              << (x->GradFn() != nullptr ? "YES" : "NO")
-              << "\n";
-}
+        x = reshape_op->forward({x});
+    }
 
     // if (x->GetShape().size() == 2) {
     //     x = std::make_shared<Tensor>(x->Reshape({

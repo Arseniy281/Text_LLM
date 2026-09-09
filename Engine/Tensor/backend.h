@@ -64,6 +64,7 @@ public:
     virtual Tensor CrossEntropyBackward(const Tensor& logits, const Tensor& targets) const = 0;
 
     virtual size_t ArgMax(const Tensor& tensor) const = 0;
+    virtual Tensor Reshape(const Tensor& input, const std::vector<size_t>& new_shape) const = 0;
 };
 
 Backend& GetBackend(Device device);

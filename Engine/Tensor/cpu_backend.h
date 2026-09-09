@@ -68,4 +68,5 @@ public:
     Tensor CrossEntropyBackward(const Tensor& logits, const Tensor& targets) const override;
 
     size_t ArgMax(const Tensor& tensor) const override;
+    Tensor Reshape(const Tensor& input, const std::vector<size_t>& new_shape) const override;
 };
