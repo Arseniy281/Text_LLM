@@ -356,6 +356,29 @@ Tensor::Tensor(Tensor&& other) noexcept
     other.rank_ = 0;
 }
 
+Tensor& Tensor::operator=(Tensor&& other) noexcept {
+    if (this == &other) return *this;
+
+    Free();
+
+    shape_ = std::move(other.shape_);
+    data_ = other.data_;
+    size_ = other.size_;
+    rank_ = other.rank_;
+    grad_ = std::move(other.grad_);
+    grad_fn_ = std::move(other.grad_fn_);
+    device_ = other.device_;
+
+    other.data_ = nullptr;
+    other.size_ = 0;
+    other.rank_ = 0;
+    other.shape_.clear();
+    other.grad_ = nullptr;
+    other.grad_fn_ = nullptr;
+
+    return *this;
+}
+
 Tensor& Tensor::operator=(const Tensor& other) {
 
     if (this == &other) {

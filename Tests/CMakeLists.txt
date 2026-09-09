@@ -37,6 +37,7 @@ function(setup_target target)
 
     target_link_libraries(${target} PRIVATE
         CUDA::cudart
+        CUDA::cublas
     )
 
 endfunction()
