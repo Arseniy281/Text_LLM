@@ -1569,7 +1569,7 @@ __global__ void SoftmaxForwardKernel(const float* input, float* output,
     if (vector_index >= total_vectors) { return; }
 
     const size_t base = vector_index * last_dim;
-    float max_value = -CUDART_INF_F;
+    float max_value = -INFINITY;
     for (size_t i = 0; i < last_dim; i++) {
         max_value = fmaxf(max_value, input[base + i]);
     }

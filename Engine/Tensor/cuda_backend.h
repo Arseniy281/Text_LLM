@@ -69,4 +69,6 @@ public:
     Tensor CrossEntropyBackward(const Tensor& logits, const Tensor& targets) const override;
 
     size_t ArgMax(const Tensor& tensor) const override;
+    Tensor Sigmoid(const Tensor& input) const override;
+    Tensor SigmoidBackward(const Tensor& input, const Tensor& grad_output) const override;
 };
