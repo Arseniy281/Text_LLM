@@ -831,17 +831,32 @@ void TestCrossEntropy() {
     std::cout << "       CROSS ENTROPY TEST\n";
     std::cout << "========================================\n";
 
-    // [batch=1, seq=1, vocab=4]
-    Tensor logits(
-        {1, 1, 4},
-        std::vector<float>{0.0f, 0.0f, 0.0f, 0.0f},
-        Device::CUDA
+    // logits: [1, 1, 4]
+    Tensor logits({1, 1, 4}, Device::CUDA);
+
+    std::vector<float> logits_host = {
+        0.0f, 0.0f, 0.0f, 0.0f
+    };
+
+    cudaMemcpy(
+        logits.Data(),
+        logits_host.data(),
+        logits_host.size() * sizeof(float),
+        cudaMemcpyHostToDevice
     );
 
-    Tensor targets(
-        {1, 1},
-        std::vector<float>{2.0f},
-        Device::CUDA
+    // target = 2
+    Tensor targets({1, 1}, Device::CUDA);
+
+    std::vector<float> targets_host = {
+        2.0f
+    };
+
+    cudaMemcpy(
+        targets.Data(),
+        targets_host.data(),
+        targets_host.size() * sizeof(float),
+        cudaMemcpyHostToDevice
     );
 
     CrossEntropyLoss loss;
