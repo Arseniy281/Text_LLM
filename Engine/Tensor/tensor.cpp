@@ -585,6 +585,22 @@ void Tensor::backward(const Tensor& grad_output) {
     std::vector<Tensor*> graph;
     std::unordered_set<Tensor*> visited;
 
+    std::cerr << "\nBACKWARD: "
+          << tensor->grad_fn_->Name()
+          << "\n";
+
+std::cerr << "tensor shape: ";
+for (size_t x : tensor->GetShape()) {
+    std::cerr << x << " ";
+}
+std::cerr << "\n";
+
+std::cerr << "grad shape: ";
+for (size_t x : tensor->Grad()->GetShape()) {
+    std::cerr << x << " ";
+}
+std::cerr << "\n";
+
     BuildBackwardGraph(
         graph,
         visited
