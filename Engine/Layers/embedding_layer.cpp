@@ -35,7 +35,7 @@ EmbeddingLayer::EmbeddingLayer(
 
         embeddings_ = Tensor(
             {vocab_size, embedding_dim},
-            cpu_embeddings.GetData()
+            cpu_embeddings.Data()
         );
     }
 }
