@@ -281,7 +281,7 @@ int main() {
 
     const size_t CONTEXT = 32;
 
-    const size_t STEPS = 100;
+    const size_t STEPS = 1000;
 
     const float LR = 0.001f;
 
@@ -577,7 +577,7 @@ int main() {
         // Logging
         // ----------------------------------------------------
 
-        if (step % 10 == 0 ||
+        if (step % 100 == 0 ||
             step == STEPS - 1) {
 
             std::cout

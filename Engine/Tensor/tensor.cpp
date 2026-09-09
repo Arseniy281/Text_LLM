@@ -528,9 +528,6 @@ void Tensor::SetGrad(std::shared_ptr<Tensor> grad) {
 
 void Tensor::AddGrad(Tensor grad) {
     if (grad_ == nullptr) {
-    }
-
-    if (grad_ == nullptr) {
         grad_ = std::make_shared<Tensor>(std::move(grad));
         return;
     }
