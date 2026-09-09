@@ -3,14 +3,57 @@
 #include "../Tensor/tensor.h"
 #include "linear_layer.h"
 
+#include <cuda_runtime.h>
+#include <stdexcept>
+#include <string>
+
 #include <cmath>
 #include <memory>
 
-LinearLayer::LinearLayer(size_t in, size_t out) : input_size_(in),output_size_(out) {
-    float limit = std::sqrt(6.0f / static_cast<float>(in + out));
+LinearLayer::LinearLayer(size_t in, size_t out, Device device)
+        : input_size_(in), output_size_(out) {
 
-    W_ = std::make_shared<Tensor>(Tensor::Random({in, out}, -limit, limit));
-    b_ = std::make_shared<Tensor>(Tensor({1, out}, 0.0f));
+    float limit = std::sqrt( 6.0f / static_cast<float>(in + out));
+
+    if (device == Device::CPU) {
+        W_ = std::make_shared<Tensor>(
+            Tensor::Random({in, out}, -limit, limit)
+        );
+
+        b_ = std::make_shared<Tensor>(Tensor({1, out}, 0.0f));
+
+        return;
+    }
+
+    Tensor cpu_weights = Tensor::Random({in, out}, -limit, limit);
+
+    W_ = std::make_shared<Tensor>(
+        std::vector<size_t>{in, out},
+        Device::CUDA
+    );
+
+    cudaError_t error = cudaMemcpy(
+        W_->Data(),
+        cpu_weights.Data(),
+        cpu_weights.GetSize() * sizeof(float),
+        cudaMemcpyHostToDevice
+    );
+
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string(
+                "LinearLayer: failed to copy "
+                "weights to CUDA: "
+            ) +
+            cudaGetErrorString(error)
+        );
+    }
+
+    b_ = std::make_shared<Tensor>(
+        std::vector<size_t>{1, out},
+        0.0f,
+        Device::CUDA
+    );
 }
 
 void LinearLayer::ClearGrad() {

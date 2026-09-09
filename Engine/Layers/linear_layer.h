@@ -14,7 +14,7 @@ private:
     std::shared_ptr<Tensor> saved_mult_;
     std::shared_ptr<Tensor> saved_added_;
 public:
-    LinearLayer(size_t in, size_t out);
+    LinearLayer(size_t in, size_t out, Device device = Device::CPU);
     LinearLayer() = default;
 
     void ClearGrad();

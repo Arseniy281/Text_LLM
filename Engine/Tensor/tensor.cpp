@@ -57,20 +57,54 @@ AddGradProfileInitializer add_grad_profile_initializer;
 }
 
 void Tensor::Allocate() {
+
+    if (size_ == 0) {
+        data_ = nullptr;
+        return;
+    }
+
     if (device_ == Device::CPU) {
+
         data_ = new float[size_];
-    } else {
-        // cudaMalloc(&data_, size_ * sizeof(float));
+
+        return;
+    }
+
+    cudaError_t error = cudaMalloc(
+        reinterpret_cast<void**>(&data_),
+        size_ * sizeof(float)
+    );
+
+    if (error != cudaSuccess) {
+
+        throw std::runtime_error(
+            std::string("cudaMalloc failed: ") +
+            cudaGetErrorString(error)
+        );
     }
 }
 
 void Tensor::Free() {
-    if (data_ == nullptr) { return; }
+
+    if (data_ == nullptr) {
+        return;
+    }
 
     if (device_ == Device::CPU) {
+
         delete[] data_;
+
     } else {
-        // cudaFree(data_);
+
+        cudaError_t error = cudaFree(data_);
+
+        if (error != cudaSuccess) {
+
+            std::cerr
+                << "cudaFree failed: "
+                << cudaGetErrorString(error)
+                << "\n";
+        }
     }
 
     data_ = nullptr;
@@ -204,18 +238,45 @@ Tensor::Tensor(
     );
 }
 
-Tensor::Tensor(std::vector<size_t> shape, Device device)
-    : shape_(std::move(shape)),
-      device_(device) {
+Tensor::Tensor(std::vector<size_t> shape, float k, Device device)
+        : shape_(std::move(shape)), device_(device) {
 
     rank_ = shape_.size();
-
     size_ = 1;
+
     for (size_t dim : shape_) {
         size_ *= dim;
     }
 
     Allocate();
+
+    if (device_ == Device::CPU) {
+        for (size_t i = 0; i < size_; ++i) {
+            data_[i] = k;
+        }
+        return;
+    }
+    if (k != 0.0f) {
+
+        throw std::runtime_error(
+            "Tensor CUDA scalar initialization "
+            "currently supports only zero"
+        );
+    }
+
+    cudaError_t error = cudaMemset(
+        data_,
+        0,
+        size_ * sizeof(float)
+    );
+
+    if (error != cudaSuccess) {
+
+        throw std::runtime_error(
+            std::string("cudaMemset failed: ") +
+            cudaGetErrorString(error)
+        );
+    }
 }
 
 Tensor::Tensor(std::vector<size_t> shape, float k, Device device)
@@ -264,14 +325,38 @@ Tensor::Tensor(const Tensor& other)
       rank_(other.rank_),
       device_(other.device_) {
 
-    if (other.data_ != nullptr) {
-        Allocate();
+    Allocate();
+
+    if (size_ == 0) {
+        return;
+    }
+
+    if (device_ == Device::CPU) {
 
         std::copy(
             other.data_,
             other.data_ + size_,
             data_
         );
+
+    } else {
+
+        cudaError_t error = cudaMemcpy(
+            data_,
+            other.data_,
+            size_ * sizeof(float),
+            cudaMemcpyDeviceToDevice
+        );
+
+        if (error != cudaSuccess) {
+
+            throw std::runtime_error(
+                std::string(
+                    "CUDA copy constructor failed: "
+                ) +
+                cudaGetErrorString(error)
+            );
+        }
     }
 }
 
@@ -318,7 +403,7 @@ Tensor::Tensor(Tensor&& other) noexcept
     other.rank_ = 0;
 }
 
-Tensor& Tensor::operator=(Tensor&& other) noexcept {
+Tensor& Tensor::operator=(const Tensor& other) {
 
     if (this == &other) {
         return *this;
@@ -326,19 +411,53 @@ Tensor& Tensor::operator=(Tensor&& other) noexcept {
 
     Free();
 
-    shape_ = std::move(other.shape_);
-    data_ = other.data_;
+    shape_ = other.shape_;
     size_ = other.size_;
     rank_ = other.rank_;
-    grad_ = std::move(other.grad_);
-    grad_fn_ = std::move(other.grad_fn_);
     device_ = other.device_;
 
-    other.data_ = nullptr;
-    other.size_ = 0;
-    other.rank_ = 0;
+    grad_ = nullptr;
+    grad_fn_ = nullptr;
+
+    Allocate();
+
+    if (size_ == 0) {
+        return *this;
+    }
+
+    if (device_ == Device::CPU) {
+
+        std::copy(
+            other.data_,
+            other.data_ + size_,
+            data_
+        );
+
+    } else {
+
+        cudaError_t error = cudaMemcpy(
+            data_,
+            other.data_,
+            size_ * sizeof(float),
+            cudaMemcpyDeviceToDevice
+        );
+
+        if (error != cudaSuccess) {
+
+            throw std::runtime_error(
+                std::string(
+                    "CUDA copy assignment failed: "
+                ) +
+                cudaGetErrorString(error)
+            );
+        }
+    }
 
     return *this;
+}
+
+Device Tensor::GetDevice() const {
+    return device_;
 }
 
 

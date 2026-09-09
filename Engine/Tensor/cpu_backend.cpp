@@ -1,6 +1,10 @@
 #include "tensor.h"
 #include "cpu_backend.h"
+#ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
+#else
+#include <cblas.h> 
+#endif
 
 static void CheckDimension(size_t value) {
     if (value > static_cast<size_t>(INT_MAX)) {
