@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <chrono>
 #include <iostream>
+#include <filesystem>
 
 namespace {
 struct ScopedTimer {
