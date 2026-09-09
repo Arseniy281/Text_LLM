@@ -6,6 +6,8 @@
 #include <string>
 #include <cmath>
 
+#include <cuda_runtime.h>
+
 void TestAttentionKVCache() {
     std::cout << "\n";
     std::cout << "========================================\n";
@@ -682,118 +684,565 @@ void PrintTokens(const std::vector<size_t>& tokens, BPETokenizer& tokenizer) {
 
 int main() {
     std::cout << "=== Training & Generation Test ===\n\n";
-    
+
+    using Clock = std::chrono::high_resolution_clock;
+
+    // ============================================================
     // 1. Токенизатор
+    // ============================================================
+
     BPETokenizer tokenizer;
-    
-    // 2. Обучающие данные (маленький текст)
-    std::string corpus = "hello world hello world hello world";
+
+    std::string corpus =
+        "hello world hello world hello world";
+
     tokenizer.Train(corpus, 50);
     tokenizer.Save("vocab.txt");
-    std::cout << "Vocabulary size: " << tokenizer.GetVocabSize() << "\n\n";
-    
-    // 3. Создаём модель
-    size_t vocab_size = tokenizer.GetVocabSize();
+
+    std::cout
+        << "Vocabulary size: "
+        << tokenizer.GetVocabSize()
+        << "\n\n";
+
+
+    // ============================================================
+    // 2. Создаём модель
+    // ============================================================
+
+    size_t vocab_size =
+        tokenizer.GetVocabSize();
+
     size_t embed_dim = 16;
     size_t num_blocks = 2;
     size_t num_heads = 2;
     size_t hidden_dim = 32;
+
     float learning_rate = 0.01f;
     int epochs = 1000;
-    
-    LanguageModel model(vocab_size, embed_dim, num_blocks, num_heads, hidden_dim);
-    std::cout << "Model created\n\n";
-    
-    // 4. Подготовка данных
-    std::vector<int> tokens = PrepareBatch("hello world", tokenizer);
+
+    LanguageModel model(
+        vocab_size,
+        embed_dim,
+        num_blocks,
+        num_heads,
+        hidden_dim
+    );
+
+    std::cout
+        << "Model created\n\n";
+
+
+    // ============================================================
+    // 3. Подготовка данных
+    // ============================================================
+
+    std::vector<int> tokens =
+        PrepareBatch(
+            "hello world",
+            tokenizer
+        );
+
     std::cout << "Tokens: ";
-    for (int t : tokens) std::cout << t << " ";
+
+    for (int t : tokens) {
+        std::cout << t << " ";
+    }
+
     std::cout << "\n\n";
-    
-    // 5. Цикл обучения
-    std::cout << "Training started...\n";
+
+
+    // ============================================================
+    // 4. Training
+    // ============================================================
+
+    std::cout
+        << "Training started...\n\n";
+
     CrossEntropyLoss loss_fn;
 
     model.SetUseKVCache(false);
 
+
+    // ------------------------------------------------------------
+    // Общая статистика
+    // ------------------------------------------------------------
+
+    double total_forward_ms = 0.0;
+    double total_loss_ms = 0.0;
+    double total_backward_ms = 0.0;
+    double total_update_ms = 0.0;
+    double total_step_ms = 0.0;
+
+    size_t total_steps = 0;
+
+
+    auto training_start =
+        Clock::now();
+
+
     for (int epoch = 0; epoch < epochs; epoch++) {
+
         float total_loss = 0.0f;
 
-        for (size_t i = 0; i < tokens.size() - 1; i++) {
+        double epoch_forward_ms = 0.0;
+        double epoch_loss_ms = 0.0;
+        double epoch_backward_ms = 0.0;
+        double epoch_update_ms = 0.0;
+        double epoch_total_ms = 0.0;
+
+
+        auto epoch_start =
+            Clock::now();
+
+
+        for (size_t i = 0;
+             i < tokens.size() - 1;
+             i++) {
+
+            auto step_start =
+                Clock::now();
+
+
+            // ====================================================
+            // Reset cache
+            // ====================================================
+
             model.ResetCache();
+
+
+            // ====================================================
+            // Prepare prefix
+            // ====================================================
 
             std::vector<int> prefix(
                 tokens.begin(),
                 tokens.begin() + i + 1
             );
 
-            auto input = std::make_shared<Tensor>(Tensor({1, prefix.size()}));
+            auto input =
+                std::make_shared<Tensor>(
+                    Tensor({1, prefix.size()})
+                );
 
-            for (size_t j = 0; j < prefix.size(); j++) {
+            for (size_t j = 0;
+                 j < prefix.size();
+                 j++) {
+
                 input->at({0, j}) =
                     static_cast<float>(prefix[j]);
             }
 
-            auto logits_ptr = model.forward(input);
-            Tensor& logits = *logits_ptr;
 
-            Tensor loss = loss_fn.forward(
-                logits,
-                prefix.size() - 1,
-                tokens[i + 1]
+            // ====================================================
+            // FORWARD
+            // ====================================================
+
+            auto forward_start =
+                Clock::now();
+
+            auto logits_ptr =
+                model.forward(input);
+
+            auto forward_end =
+                Clock::now();
+
+
+            double forward_ms =
+                std::chrono::duration<double, std::milli>(
+                    forward_end - forward_start
+                ).count();
+
+
+            epoch_forward_ms += forward_ms;
+            total_forward_ms += forward_ms;
+
+
+            Tensor& logits =
+                *logits_ptr;
+
+
+            // ====================================================
+            // LOSS
+            // ====================================================
+
+            auto loss_start =
+                Clock::now();
+
+            Tensor loss =
+                loss_fn.forward(
+                    logits,
+                    prefix.size() - 1,
+                    tokens[i + 1]
+                );
+
+            auto loss_end =
+                Clock::now();
+
+
+            double loss_ms =
+                std::chrono::duration<double, std::milli>(
+                    loss_end - loss_start
+                ).count();
+
+
+            epoch_loss_ms += loss_ms;
+            total_loss_ms += loss_ms;
+
+
+            total_loss +=
+                loss.at(0);
+
+
+            // ====================================================
+            // BACKWARD
+            // ====================================================
+
+            auto backward_start =
+                Clock::now();
+
+            Tensor grad_logits =
+                loss_fn.backward();
+
+            logits.backward(
+                grad_logits
             );
 
-            total_loss += loss.at(0);
+            auto backward_end =
+                Clock::now();
 
-            Tensor grad_logits = loss_fn.backward();
-            logits.backward(grad_logits);
 
-            model.Update(learning_rate);
+            double backward_ms =
+                std::chrono::duration<double, std::milli>(
+                    backward_end - backward_start
+                ).count();
+
+
+            epoch_backward_ms += backward_ms;
+            total_backward_ms += backward_ms;
+
+
+            // ====================================================
+            // UPDATE
+            // ====================================================
+
+            auto update_start =
+                Clock::now();
+
+            model.Update(
+                learning_rate
+            );
+
             model.ClearGrad();
+
+            auto update_end =
+                Clock::now();
+
+
+            double update_ms =
+                std::chrono::duration<double, std::milli>(
+                    update_end - update_start
+                ).count();
+
+
+            epoch_update_ms += update_ms;
+            total_update_ms += update_ms;
+
+
+            // ====================================================
+            // STEP TOTAL
+            // ====================================================
+
+            auto step_end =
+                Clock::now();
+
+            double step_ms =
+                std::chrono::duration<double, std::milli>(
+                    step_end - step_start
+                ).count();
+
+
+            epoch_total_ms += step_ms;
+            total_step_ms += step_ms;
+
+            total_steps++;
         }
-        if (epoch % 100 == 0 || epoch == epochs - 1) {
+
+
+        auto epoch_end =
+            Clock::now();
+
+
+        double real_epoch_ms =
+            std::chrono::duration<double, std::milli>(
+                epoch_end - epoch_start
+            ).count();
+
+
+        // ========================================================
+        // Logging
+        // ========================================================
+
+        if (epoch % 100 == 0 ||
+            epoch == epochs - 1) {
+
+            double steps_per_second =
+                (epoch_total_ms > 0.0)
+                    ? (tokens.size() - 1) /
+                      (epoch_total_ms / 1000.0)
+                    : 0.0;
+
             std::cout
-                << "Epoch " << epoch
-                << ", Loss: "
-                << total_loss / (tokens.size() - 1)
+                << "Epoch "
+                << std::setw(4)
+                << epoch
+                << " | Loss: "
+                << total_loss /
+                   static_cast<float>(tokens.size() - 1)
+                << "\n";
+
+            std::cout
+                << "    Forward : "
+                << std::fixed
+                << std::setprecision(3)
+                << epoch_forward_ms
+                << " ms\n";
+
+            std::cout
+                << "    Loss    : "
+                << epoch_loss_ms
+                << " ms\n";
+
+            std::cout
+                << "    Backward: "
+                << epoch_backward_ms
+                << " ms\n";
+
+            std::cout
+                << "    Update  : "
+                << epoch_update_ms
+                << " ms\n";
+
+            std::cout
+                << "    Total   : "
+                << real_epoch_ms
+                << " ms\n";
+
+            std::cout
+                << "    Steps/s : "
+                << steps_per_second
+                << "\n";
+
+            std::cout
                 << "\n";
         }
     }
 
-    TestPredictions(model, tokens);
+
+    auto training_end =
+        Clock::now();
+
+
+    double training_ms =
+        std::chrono::duration<double, std::milli>(
+            training_end - training_start
+        ).count();
+
+
+    // ============================================================
+    // 5. FINAL PROFILE
+    // ============================================================
+
+    std::cout << "\n";
+    std::cout
+        << "========================================\n";
+
+    std::cout
+        << "        TRAINING PROFILE\n";
+
+    std::cout
+        << "========================================\n";
+
+    std::cout
+        << "Total training time: "
+        << training_ms / 1000.0
+        << " s\n";
+
+    std::cout
+        << "Total steps: "
+        << total_steps
+        << "\n\n";
+
+
+    std::cout
+        << "Forward total : "
+        << total_forward_ms
+        << " ms\n";
+
+    std::cout
+        << "Loss total    : "
+        << total_loss_ms
+        << " ms\n";
+
+    std::cout
+        << "Backward total: "
+        << total_backward_ms
+        << " ms\n";
+
+    std::cout
+        << "Update total  : "
+        << total_update_ms
+        << " ms\n";
+
+    std::cout
+        << "Step total    : "
+        << total_step_ms
+        << " ms\n";
+
+
+    // ============================================================
+    // Percentages
+    // ============================================================
+
+    if (total_step_ms > 0.0) {
+
+        std::cout << "\n";
+
+        std::cout
+            << "Forward share : "
+            << total_forward_ms /
+               total_step_ms * 100.0
+            << " %\n";
+
+        std::cout
+            << "Loss share    : "
+            << total_loss_ms /
+               total_step_ms * 100.0
+            << " %\n";
+
+        std::cout
+            << "Backward share: "
+            << total_backward_ms /
+               total_step_ms * 100.0
+            << " %\n";
+
+        std::cout
+            << "Update share  : "
+            << total_update_ms /
+               total_step_ms * 100.0
+            << " %\n";
+    }
+
+
+    double steps_per_second =
+        total_steps /
+        (training_ms / 1000.0);
+
+
+    double tokens_per_second =
+        total_steps /
+        (training_ms / 1000.0);
+
+
+    std::cout << "\n";
+
+    std::cout
+        << "Steps/sec : "
+        << steps_per_second
+        << "\n";
+
+    std::cout
+        << "Tokens/sec: "
+        << tokens_per_second
+        << "\n";
+
+    std::cout
+        << "========================================\n";
+
+
+    // ============================================================
+    // 6. Prediction
+    // ============================================================
+
+    TestPredictions(
+        model,
+        tokens
+    );
+
+
+    // ============================================================
+    // 7. KV-cache test
+    // ============================================================
 
     std::vector<int> test_tokens = {
-        7, 4, 11, 11, 14, 22, 14, 17, 11, 3
+        7, 4, 11, 11, 14,
+        22, 14, 17, 11, 3
     };
 
-    TestFullVsKVCache(model, test_tokens);
-    
-    // 6. Генерация
-    std::cout << "\n=== Generation ===\n";
-    
-    // Сброс кэша
+    TestFullVsKVCache(
+        model,
+        test_tokens
+    );
+
+
+    // ============================================================
+    // 8. Generation
+    // ============================================================
+
+    std::cout
+        << "\n=== Generation ===\n";
+
     model.ResetCache();
-    
-    size_t start_token = tokens[0];
-    int end_token_id = -1; // или -1
+
+    size_t start_token =
+        tokens[0];
+
+    int end_token_id = -1;
     int max_len = 20;
-    // float temperature = 0.8f;
-    // float top_p = 0.9f;
+
     float temperature = 1.0f;
     float top_p = 0.0f;
 
-    // Обучим модель (здесь просто генерация без обучения)
-    std::cout << "Generating with greedy sample:\n";
-    std::vector<size_t> generated = model.generate({start_token}, max_len, temperature, top_p, end_token_id);
-    
-    std::cout << "Tokens: ";
-    for (int t : generated) std::cout << t << " ";
+
+    std::cout
+        << "Generating with greedy sample:\n";
+
+
+    std::vector<size_t> generated =
+        model.generate(
+            {start_token},
+            max_len,
+            temperature,
+            top_p,
+            end_token_id
+        );
+
+
+    std::cout
+        << "Tokens: ";
+
+    for (size_t t : generated) {
+        std::cout
+            << t
+            << " ";
+    }
+
     std::cout << "\n";
-    
-    std::cout << "Text: ";
-    PrintTokens(generated, tokenizer);
+
+
+    std::cout
+        << "Text: ";
+
+    PrintTokens(
+        generated,
+        tokenizer
+    );
+
     std::cout << "\n";
-    
-    std::cout << "=== Test completed ===\n";
+
+
+    std::cout
+        << "=== Test completed ===\n";
+
+
     return 0;
 }
