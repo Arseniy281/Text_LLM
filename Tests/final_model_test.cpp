@@ -2,6 +2,7 @@
 #include "../Engine/Layers/ce_loss.h"
 #include "../Engine/Tensor/tensor.h"
 #include "../Engine/Tensor/device.h"
+#include <iomanip>
 
 #include <cuda_runtime.h>
 
