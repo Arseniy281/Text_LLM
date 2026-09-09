@@ -366,7 +366,7 @@ void TestAttentionKVCache() {
 
 void TestFullVsKVCache(
     LanguageModel& model,
-    const std::vector<int>& tokens
+    const std::vector<size_t>& tokens
 ) {
     std::cout << "\n";
     std::cout << "========================================\n";
@@ -690,7 +690,7 @@ void TestFullVsKVCache(
 
 void TestPredictions(
     LanguageModel& model,
-    const std::vector<int>& tokens
+    const std::vector<size_t>& tokens
 ) {
     std::cout << "\n=== Prediction Test ===\n";
 
@@ -1201,7 +1201,7 @@ int main() {
         model.SetUseKVCache(true);
         model.ResetCache();
 
-        std::vector<int> generated = tokens;
+        std::vector<size_t> generated = tokens;
 
         const size_t generation_length = 10;
 
