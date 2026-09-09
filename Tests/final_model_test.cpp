@@ -26,6 +26,9 @@ const size_t HEADS = 2;
 const size_t HIDDEN = 64;
 
 const size_t CONTEXT = 32;
+
+// Batch = 1.
+// На каждом шаге берём новое случайное окно из всей книги.
 const size_t STEPS = 5000;
 
 const float LR = 0.001f;
@@ -38,27 +41,34 @@ const std::string DATA_PATH =
 // ============================================================
 
 float GetScalar(const Tensor& tensor) {
+
     if (tensor.GetSize() != 1) {
         throw std::runtime_error(
             "GetScalar: tensor must contain exactly one value"
         );
     }
 
-    Tensor cpu_tensor(
-        tensor.GetShape(),
-        Device::CPU
-    );
+    if (tensor.GetDevice() == Device::CPU) {
+        return tensor.at(0);
+    }
 
-    cudaMemcpy(
-        cpu_tensor.at(0) == cpu_tensor.at(0)
-            ? nullptr
-            : nullptr,
-        nullptr,
-        0,
+    float value = 0.0f;
+
+    cudaError_t error = cudaMemcpy(
+        &value,
+        tensor.Data(),
+        sizeof(float),
         cudaMemcpyDeviceToHost
     );
 
-    return tensor.at(0);
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string("GetScalar cudaMemcpy failed: ") +
+            cudaGetErrorString(error)
+        );
+    }
+
+    return value;
 }
 
 // ============================================================
@@ -66,12 +76,12 @@ float GetScalar(const Tensor& tensor) {
 // ============================================================
 
 int main() {
+
     try {
+
         std::cout
-            << "========================================\n";
-        std::cout
-            << "     RANDOM WINDOW CUDA MODEL TEST\n";
-        std::cout
+            << "========================================\n"
+            << "     RANDOM WINDOW CUDA MODEL TEST\n"
             << "========================================\n\n";
 
         // ----------------------------------------------------
@@ -188,6 +198,7 @@ int main() {
             Device::CUDA
         );
 
+        // KV cache во время обучения не нужен.
         model.SetUseKVCache(false);
 
         CrossEntropyLoss loss;
@@ -257,10 +268,12 @@ int main() {
 
         double loss_sum = 0.0;
 
-        for (size_t step = 0; step < STEPS; ++step) {
+        for (size_t step = 0;
+             step < STEPS;
+             ++step) {
 
             // ------------------------------------------------
-            // Random window
+            // Выбираем случайное окно
             // ------------------------------------------------
 
             size_t start =
@@ -274,7 +287,10 @@ int main() {
                 CONTEXT
             );
 
-            for (size_t i = 0; i < CONTEXT; ++i) {
+            for (size_t i = 0;
+                 i < CONTEXT;
+                 ++i) {
+
                 input_data[i] =
                     static_cast<float>(
                         tokens[start + i]
@@ -435,9 +451,12 @@ int main() {
         }
 
         if (last_loss >= initial_loss) {
+
             std::cout
                 << "\n[WARNING] Loss did not decrease.\n";
+
         } else {
+
             std::cout
                 << "\n[OK] Loss decreased.\n";
         }

@@ -1,480 +1,750 @@
-#include "../../Engine/Layers/language_model.h"
-#include "../../Engine/Layers/ce_loss.h"
-#include "../../Engine/Tokenizer/bpe_tokenizer.h"
-#include "../../Engine/Tensor/tensor.h"
-#include "../../Engine/Tensor/device.h"
-
+#include "tensor.h"
+#include "device.h"
 #include <cuda_runtime.h>
 
-#include <iostream>
-#include <vector>
-#include <cmath>
 #include <fstream>
-#include <random>
+#include <sstream>
+#include <chrono>
+#include <iostream>
 #include <iomanip>
-#include <stdexcept>
+#include <cstdlib>
 
-// ============================================================
-// Настройки
-// ============================================================
+namespace {
 
-const size_t VOCAB_SIZE = 1000;
+double add_grad_time = 0.0;
+size_t add_grad_calls = 0;
 
-const size_t EMBED_DIM = 32;
-const size_t BLOCKS = 2;
-const size_t HEADS = 2;
-const size_t HIDDEN = 64;
+void PrintAddGradProfile() {
 
-const size_t CONTEXT = 32;
+    std::cout
+        << "\n========================================\n"
+        << "       Tensor::AddGrad PROFILE\n"
+        << "========================================\n";
 
-// Batch = 1.
-// На каждом шаге берём новое случайное окно из всей книги.
-const size_t STEPS = 5000;
+    std::cout
+        << "Calls: "
+        << add_grad_calls
+        << "\n";
 
-const float LR = 0.001f;
+    std::cout
+        << "Total: "
+        << std::fixed
+        << std::setprecision(3)
+        << add_grad_time
+        << " ms\n";
 
-const std::string DATA_PATH =
-    "../Data/master_and_margarita.txt";
+    if (add_grad_calls > 0) {
 
-// ============================================================
-// CUDA scalar -> CPU
-// ============================================================
+        std::cout
+            << "Avg:   "
+            << add_grad_time / add_grad_calls
+            << " ms\n";
+    }
 
-float GetScalar(const Tensor& tensor) {
+    std::cout
+        << "========================================\n";
+}
 
-    if (tensor.GetSize() != 1) {
+struct AddGradProfileInitializer {
+
+    AddGradProfileInitializer() {
+
+        std::atexit(PrintAddGradProfile);
+    }
+};
+
+AddGradProfileInitializer add_grad_profile_initializer;
+
+}
+
+void Tensor::Allocate() {
+
+    if (size_ == 0) {
+        data_ = nullptr;
+        return;
+    }
+
+    if (device_ == Device::CPU) {
+
+        data_ = new float[size_];
+
+        return;
+    }
+
+    cudaError_t error = cudaMalloc(
+        reinterpret_cast<void**>(&data_),
+        size_ * sizeof(float)
+    );
+
+    if (error != cudaSuccess) {
+
         throw std::runtime_error(
-            "GetScalar: tensor must contain exactly one value"
+            std::string("cudaMalloc failed: ") +
+            cudaGetErrorString(error)
+        );
+    }
+}
+
+void Tensor::Free() {
+
+    if (data_ == nullptr) {
+        return;
+    }
+
+    if (device_ == Device::CPU) {
+
+        delete[] data_;
+
+    } else {
+
+        cudaError_t error = cudaFree(data_);
+
+        if (error != cudaSuccess) {
+
+            std::cerr
+                << "cudaFree failed: "
+                << cudaGetErrorString(error)
+                << "\n";
+        }
+    }
+
+    data_ = nullptr;
+}
+
+size_t Tensor::ComputeIndex(const std::vector<size_t>& indexes) const {
+    if (indexes.size() != rank_) {
+        std::ostringstream oss;
+        oss << "Number of indexes must match rank: got " << indexes.size()
+            << " indexes for tensor of rank " << rank_ << " with shape [";
+        for (size_t i = 0; i < shape_.size(); ++i) {
+            oss << shape_[i];
+            if (i + 1 < shape_.size()) oss << ", ";
+        }
+        oss << "] - indexes: [";
+        for (size_t i = 0; i < indexes.size(); ++i) {
+            oss << indexes[i];
+            if (i + 1 < indexes.size()) oss << ", ";
+        }
+        oss << "]";
+        throw std::runtime_error(oss.str());
+    }
+    
+    size_t index = 0;
+    size_t step = 1;
+    
+    for (size_t i = rank_; i-- > 0;) {
+        if (indexes[i] >= shape_[i]) {
+            throw std::runtime_error("Index out of bounds");
+        }
+
+        index += indexes[i] * step;
+        step *= shape_[i];
+    }
+    
+    return index;
+}
+
+Tensor::Tensor(std::vector<size_t> shape)
+    : shape_(std::move(shape)) {
+
+    size_ = std::accumulate(
+        shape_.begin(),
+        shape_.end(),
+        static_cast<size_t>(1),
+        std::multiplies<size_t>()
+    );
+
+    rank_ = shape_.size();
+    Allocate();
+}
+
+Tensor::Tensor(std::vector<size_t> shape, float k)
+    : shape_(std::move(shape)) {
+
+    size_ = std::accumulate(
+        shape_.begin(),
+        shape_.end(),
+        static_cast<size_t>(1),
+        std::multiplies<size_t>()
+    );
+
+    rank_ = shape_.size();
+
+    Allocate();
+
+    std::fill(
+        data_,
+        data_ + size_,
+        k
+    );
+}
+
+Tensor::Tensor(std::vector<size_t> shape, UninitializedTag)
+    : shape_(std::move(shape)) {
+
+    size_ = std::accumulate(
+        shape_.begin(),
+        shape_.end(),
+        static_cast<size_t>(1),
+        std::multiplies<size_t>()
+    );
+
+    rank_ = shape_.size();
+    Allocate();
+}
+
+Tensor Tensor::Random(std::vector<size_t> shape, float min, float max, Device device) {
+    Tensor result(shape, device);
+
+    static std::mt19937 gen(42);
+    std::uniform_real_distribution<float> dist(min, max);
+
+    std::vector<float> data(result.size_);
+
+    for (size_t i = 0; i < result.size_; i++) {
+        data[i] = dist(gen);
+    }
+
+    if (device == Device::CPU) {
+        for (size_t i = 0; i < result.size_; i++) {
+            result.data_[i] = data[i];
+        }
+    } else {
+        cudaMemcpy(
+            result.data_,
+            data.data(),
+            result.size_ * sizeof(float),
+            cudaMemcpyHostToDevice
         );
     }
 
-    if (tensor.GetDevice() == Device::CPU) {
-        return tensor.at(0);
+    return result;
+}
+
+Tensor::Tensor(
+    std::vector<size_t> shape,
+    std::vector<float> data
+)
+    : shape_(std::move(shape)) {
+
+    rank_ = shape_.size();
+
+    size_ = std::accumulate(
+        shape_.begin(),
+        shape_.end(),
+        static_cast<size_t>(1),
+        std::multiplies<size_t>()
+    );
+
+    Allocate();
+
+    size_t copy_size = std::min(
+        data.size(),
+        size_
+    );
+
+    std::copy(
+        data.begin(),
+        data.begin() + copy_size,
+        data_
+    );
+}
+
+Tensor::Tensor(std::vector<size_t> shape, float k, Device device)
+        : shape_(std::move(shape)), device_(device) {
+            
+    rank_ = shape_.size();
+    size_ = 1;
+    for (size_t dim : shape_) {
+        size_ *= dim;
     }
 
-    float value = 0.0f;
+    Allocate();
+
+    if (size_ == 0) {
+        return;
+    }
+
+    if (device_ == Device::CPU) {
+        for (size_t i = 0; i < size_; ++i) {
+            data_[i] = k;
+        }
+        return;
+    }
+
+    if (k == 0.0f) {
+        cudaError_t error = cudaMemset(
+            data_,
+            0,
+            size_ * sizeof(float)
+        );
+
+        if (error != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("cudaMemset failed: ") +
+                cudaGetErrorString(error)
+            );
+        }
+
+        return;
+    }
+
+    std::vector<float> host_data(size_, k);
 
     cudaError_t error = cudaMemcpy(
-        &value,
-        tensor.Data(),
-        sizeof(float),
-        cudaMemcpyDeviceToHost
+        data_,
+        host_data.data(),
+        size_ * sizeof(float),
+        cudaMemcpyHostToDevice
     );
 
     if (error != cudaSuccess) {
         throw std::runtime_error(
-            std::string("GetScalar cudaMemcpy failed: ") +
+            std::string("CUDA scalar initialization failed: ") +
             cudaGetErrorString(error)
         );
     }
-
-    return value;
 }
 
-// ============================================================
-// Main
-// ============================================================
-
-int main() {
-
-    try {
-
-        std::cout
-            << "========================================\n"
-            << "     RANDOM WINDOW CUDA MODEL TEST\n"
-            << "========================================\n\n";
-
-        // ----------------------------------------------------
-        // CUDA
-        // ----------------------------------------------------
-
-        int device_count = 0;
-
-        cudaGetDeviceCount(&device_count);
-
-        std::cout
-            << "CUDA devices: "
-            << device_count
-            << "\n";
-
-        if (device_count == 0) {
-            throw std::runtime_error(
-                "No CUDA devices found"
-            );
-        }
-
-        cudaDeviceProp properties{};
-
-        cudaGetDeviceProperties(
-            &properties,
-            0
-        );
-
-        std::cout
-            << "GPU: "
-            << properties.name
-            << "\n\n";
-
-        // ----------------------------------------------------
-        // Load book
-        // ----------------------------------------------------
-
-        std::cout
-            << "========================================\n"
-            << "          LOADING TEXT\n"
-            << "========================================\n";
-
-        std::ifstream file(DATA_PATH);
-
-        if (!file) {
-            throw std::runtime_error(
-                "Cannot open: " + DATA_PATH
-            );
-        }
-
-        std::string text(
-            (std::istreambuf_iterator<char>(file)),
-            std::istreambuf_iterator<char>()
-        );
-
-        std::cout
-            << "Text size: "
-            << text.size()
-            << " characters\n\n";
-
-        // ----------------------------------------------------
-        // Tokenizer
-        // ----------------------------------------------------
-
-        std::cout
-            << "========================================\n"
-            << "           TOKENIZATION\n"
-            << "========================================\n";
-
-        BPETokenizer tokenizer;
-
-        tokenizer.Train(
-            text,
-            VOCAB_SIZE
-        );
-
-        std::vector<size_t> tokens =
-            tokenizer.Encode(text);
-
-        std::cout
-            << "Tokens: "
-            << tokens.size()
-            << "\n";
-
-        if (tokens.size() <= CONTEXT) {
-            throw std::runtime_error(
-                "Not enough tokens for training"
-            );
-        }
-
-        size_t max_start =
-            tokens.size() - CONTEXT - 1;
-
-        std::cout
-            << "Possible windows: "
-            << max_start + 1
-            << "\n\n";
-
-        // ----------------------------------------------------
-        // Model
-        // ----------------------------------------------------
-
-        std::cout
-            << "========================================\n"
-            << "             MODEL\n"
-            << "========================================\n";
-
-        LanguageModel model(
-            VOCAB_SIZE,
-            EMBED_DIM,
-            BLOCKS,
-            HEADS,
-            HIDDEN,
-            Device::CUDA
-        );
-
-        // KV cache во время обучения не нужен.
-        model.SetUseKVCache(false);
-
-        CrossEntropyLoss loss;
-
-        std::cout
-            << "Vocabulary: "
-            << VOCAB_SIZE
-            << "\n";
-
-        std::cout
-            << "Embedding: "
-            << EMBED_DIM
-            << "\n";
-
-        std::cout
-            << "Blocks: "
-            << BLOCKS
-            << "\n";
-
-        std::cout
-            << "Heads: "
-            << HEADS
-            << "\n";
-
-        std::cout
-            << "Hidden: "
-            << HIDDEN
-            << "\n";
-
-        std::cout
-            << "Context: "
-            << CONTEXT
-            << "\n";
-
-        std::cout
-            << "Steps: "
-            << STEPS
-            << "\n";
-
-        std::cout
-            << "Learning rate: "
-            << LR
-            << "\n\n";
-
-        // ----------------------------------------------------
-        // Random generator
-        // ----------------------------------------------------
-
-        std::mt19937 generator(42);
-
-        std::uniform_int_distribution<size_t> distribution(
-            0,
-            max_start
-        );
-
-        // ----------------------------------------------------
-        // Training
-        // ----------------------------------------------------
-
-        std::cout
-            << "========================================\n"
-            << "             TRAINING\n"
-            << "========================================\n\n";
-
-        float initial_loss = -1.0f;
-        float last_loss = -1.0f;
-
-        double loss_sum = 0.0;
-
-        for (size_t step = 0;
-             step < STEPS;
-             ++step) {
-
-            // ------------------------------------------------
-            // Выбираем случайное окно
-            // ------------------------------------------------
-
-            size_t start =
-                distribution(generator);
-
-            std::vector<float> input_data(
-                CONTEXT
-            );
-
-            std::vector<float> target_data(
-                CONTEXT
-            );
-
-            for (size_t i = 0;
-                 i < CONTEXT;
-                 ++i) {
-
-                input_data[i] =
-                    static_cast<float>(
-                        tokens[start + i]
-                    );
-
-                target_data[i] =
-                    static_cast<float>(
-                        tokens[start + i + 1]
-                    );
-            }
-
-            // ------------------------------------------------
-            // CPU tensors
-            // ------------------------------------------------
-
-            Tensor input_cpu(
-                {CONTEXT},
-                std::move(input_data)
-            );
-
-            Tensor target_cpu(
-                {1, CONTEXT},
-                std::move(target_data)
-            );
-
-            // ------------------------------------------------
-            // CUDA tensors
-            // ------------------------------------------------
-
-            Tensor input(
-                {CONTEXT},
-                Device::CUDA
-            );
-
-            Tensor target(
-                {1, CONTEXT},
-                Device::CUDA
-            );
-
-            input_cpu.CopyToCUDA(input);
-            target_cpu.CopyToCUDA(target);
-
-            // ------------------------------------------------
-            // Forward
-            // ------------------------------------------------
-
-            model.ClearGrad();
-
-            auto input_ptr =
-                std::make_shared<Tensor>(
-                    std::move(input)
-                );
-
-            auto logits =
-                model.forward(input_ptr);
-
-            Tensor current_loss =
-                loss.forward(
-                    *logits,
-                    target
-                );
-
-            float loss_value =
-                GetScalar(current_loss);
-
-            // ------------------------------------------------
-            // Backward
-            // ------------------------------------------------
-
-            Tensor loss_grad =
-                loss.backward();
-
-            logits->backward(
-                loss_grad
-            );
-
-            // ------------------------------------------------
-            // Update
-            // ------------------------------------------------
-
-            model.Update(LR);
-
-            // ------------------------------------------------
-            // Statistics
-            // ------------------------------------------------
-
-            if (step == 0) {
-                initial_loss =
-                    loss_value;
-            }
-
-            last_loss =
-                loss_value;
-
-            loss_sum +=
-                loss_value;
-
-            // ------------------------------------------------
-            // Logging
-            // ------------------------------------------------
-
-            if (step % 100 == 0 ||
-                step == STEPS - 1) {
-
-                double average_loss =
-                    loss_sum /
-                    static_cast<double>(
-                        step + 1
-                    );
-
-                std::cout
-                    << "Step "
-                    << std::setw(4)
-                    << step
-                    << " | Loss: "
-                    << std::fixed
-                    << std::setprecision(6)
-                    << loss_value
-                    << " | Avg: "
-                    << average_loss
-                    << " | Start: "
-                    << start
-                    << "\n";
-            }
-        }
-
-        // ----------------------------------------------------
-        // Result
-        // ----------------------------------------------------
-
-        std::cout
-            << "\n========================================\n"
-            << "               RESULT\n"
-            << "========================================\n";
-
-        std::cout
-            << "Initial loss: "
-            << initial_loss
-            << "\n";
-
-        std::cout
-            << "Final loss:   "
-            << last_loss
-            << "\n";
-
-        std::cout
-            << "Loss change:  "
-            << last_loss - initial_loss
-            << "\n";
-
-        if (!std::isfinite(initial_loss) ||
-            !std::isfinite(last_loss)) {
-
-            std::cout
-                << "\n[FAIL] Loss contains NaN or Inf\n";
-
-            return 1;
-        }
-
-        if (last_loss >= initial_loss) {
-
-            std::cout
-                << "\n[WARNING] Loss did not decrease.\n";
-
-        } else {
-
-            std::cout
-                << "\n[OK] Loss decreased.\n";
-        }
-
-        std::cout
-            << "\n========================================\n"
-            << " RANDOM WINDOW TRAINING FINISHED\n"
-            << "========================================\n";
-
-        return 0;
+Tensor::~Tensor() {
+    Free();
+}
+
+Tensor::Tensor(const Tensor& other)
+    : shape_(other.shape_),
+      size_(other.size_),
+      rank_(other.rank_),
+      device_(other.device_) {
+
+    Allocate();
+
+    if (size_ == 0) {
+        return;
     }
-    catch (const std::exception& exception) {
 
-        std::cerr
-            << "\n[ERROR] "
-            << exception.what()
-            << "\n";
+    if (device_ == Device::CPU) {
 
-        return 1;
+        std::copy(
+            other.data_,
+            other.data_ + size_,
+            data_
+        );
+
+    } else {
+
+        cudaError_t error = cudaMemcpy(
+            data_,
+            other.data_,
+            size_ * sizeof(float),
+            cudaMemcpyDeviceToDevice
+        );
+
+        if (error != cudaSuccess) {
+
+            throw std::runtime_error(
+                std::string(
+                    "CUDA copy constructor failed: "
+                ) +
+                cudaGetErrorString(error)
+            );
+        }
     }
+}
+
+Tensor::Tensor(
+    std::vector<size_t> shape,
+    Device device
+)
+    : shape_(std::move(shape)),
+      device_(device) {
+    rank_ = shape_.size();
+
+    size_ = 1;
+    for (size_t dim : shape_) {
+        size_ *= dim;
+    }
+
+    Allocate();
+}
+
+Tensor::Tensor(Tensor&& other) noexcept
+    : shape_(std::move(other.shape_)),
+      data_(other.data_),
+      size_(other.size_),
+      rank_(other.rank_),
+      grad_(std::move(other.grad_)),
+      grad_fn_(std::move(other.grad_fn_)),
+      device_(other.device_) {
+
+    other.data_ = nullptr;
+    other.size_ = 0;
+    other.rank_ = 0;
+}
+
+Tensor& Tensor::operator=(Tensor&& other) noexcept {
+    if (this == &other) return *this;
+
+    Free();
+
+    shape_ = std::move(other.shape_);
+    data_ = other.data_;
+    size_ = other.size_;
+    rank_ = other.rank_;
+    grad_ = std::move(other.grad_);
+    grad_fn_ = std::move(other.grad_fn_);
+    device_ = other.device_;
+
+    other.data_ = nullptr;
+    other.size_ = 0;
+    other.rank_ = 0;
+    other.shape_.clear();
+    other.grad_ = nullptr;
+    other.grad_fn_ = nullptr;
+
+    return *this;
+}
+
+Tensor& Tensor::operator=(const Tensor& other) {
+
+    if (this == &other) {
+        return *this;
+    }
+
+    Free();
+
+    shape_ = other.shape_;
+    size_ = other.size_;
+    rank_ = other.rank_;
+    device_ = other.device_;
+
+    grad_ = nullptr;
+    grad_fn_ = nullptr;
+
+    Allocate();
+
+    if (size_ == 0) {
+        return *this;
+    }
+
+    if (device_ == Device::CPU) {
+
+        std::copy(
+            other.data_,
+            other.data_ + size_,
+            data_
+        );
+
+    } else {
+
+        cudaError_t error = cudaMemcpy(
+            data_,
+            other.data_,
+            size_ * sizeof(float),
+            cudaMemcpyDeviceToDevice
+        );
+
+        if (error != cudaSuccess) {
+
+            throw std::runtime_error(
+                std::string(
+                    "CUDA copy assignment failed: "
+                ) +
+                cudaGetErrorString(error)
+            );
+        }
+    }
+
+    return *this;
+}
+
+float& Tensor::at(size_t index) {
+    return data_[index];
+}
+const float& Tensor::at(size_t index) const {
+    return data_[index];
+}
+
+float& Tensor::at(const std::vector<size_t>& indexes) {
+    return data_[ComputeIndex(indexes)];
+}
+
+const float& Tensor::at(const std::vector<size_t>& indexes) const {
+    return data_[ComputeIndex(indexes)];
+}
+
+void Tensor::Set(std::vector<size_t> indexes, float value) {
+    data_[ComputeIndex(indexes)] = value;
+}
+
+auto Tensor::GetIter(const std::vector<size_t>& indexes) {
+    return data_ + ComputeIndex(indexes);
+}
+
+const auto Tensor::GetIter(const std::vector<size_t>& indexes) const {
+    return data_ + ComputeIndex(indexes);
+}
+
+Tensor Tensor::Reshape(std::vector<size_t> new_shape) const {
+    size_t first_size = std::accumulate(shape_.begin(), 
+        shape_.end(), 1, std::multiplies<size_t>());
+    size_t second_size = std::accumulate(new_shape.begin(), 
+        new_shape.end(), 1, std::multiplies<size_t>());
+    if (first_size != second_size) {
+        throw std::runtime_error("This reshape is not possivle");
+    }
+    Tensor tensor(*this);
+    tensor.shape_ = new_shape;
+    tensor.rank_ = tensor.shape_.size();
+    return tensor;
+}
+
+size_t Tensor::GetSize() const {
+    return size_;
+}
+
+size_t Tensor::GetRank() const {
+    return rank_;
+}
+
+const std::vector<size_t>& Tensor::GetShape() const {
+    return shape_;
+}
+
+float* Tensor::Data() {
+    return data_;
+}
+
+const float* Tensor::Data() const {
+    return data_;
+}
+
+std::shared_ptr<Tensor> Tensor::Grad() const {
+    return grad_;
+}
+
+void Tensor::SetGrad(std::shared_ptr<Tensor> grad) {
+        grad_ = grad;
+}
+
+void Tensor::AddGrad(Tensor grad) {
+    if (grad_ == nullptr) {
+        grad_ = std::make_shared<Tensor>(std::move(grad));
+        return;
+    }
+
+    if (grad_->GetShape() != grad.GetShape()) {
+        throw std::runtime_error(
+            "Tensor::AddGrad: gradient shape mismatch"
+        );
+    }
+
+    *grad_ += grad;
+}
+
+void Tensor::ClearGrad() {
+    grad_ = nullptr;
+}
+
+std::shared_ptr<Operation> Tensor::GradFn() const {
+    return grad_fn_;
+}
+
+void Tensor::SetGradFn(std::shared_ptr<Operation> op) {
+    if (op != nullptr) {
+        grad_fn_ = op;
+    }
+}
+
+void Tensor::backward(const Tensor& grad_output) {
+    if (grad_fn_ == nullptr) {
+
+        throw std::runtime_error(
+            "Cannot call backward on tensor without grad_fn"
+        );
+    }
+
+    std::vector<Tensor*> graph;
+    std::unordered_set<Tensor*> visited;
+
+    BuildBackwardGraph(
+        graph,
+        visited
+    );
+
+    AddGrad(grad_output);
+
+    size_t operation_index = 0;
+
+    for (auto it = graph.rbegin();
+         it != graph.rend();
+         ++it) {
+
+        Tensor* tensor = *it;
+
+        if (tensor == nullptr) {
+            continue;
+        }
+
+        if (tensor->grad_fn_ == nullptr) {
+            continue;
+        }
+
+        operation_index++;
+
+        const char* operation_name =
+            tensor->grad_fn_->Name();
+
+        if (tensor->grad_ == nullptr) {
+            throw std::runtime_error(
+                std::string(
+                    "Tensor::backward: missing gradient for operation "
+                ) + operation_name
+            );
+        }
+        std::vector<std::shared_ptr<Tensor>> inputs =
+            tensor->grad_fn_->GetInputs();
+
+        for (size_t i = 0;
+             i < inputs.size();
+             ++i) {
+
+            if (inputs[i] == nullptr) {
+                continue;
+            }
+        }
+
+        std::vector<Tensor> gradients =
+            tensor->grad_fn_->backward(
+                *tensor->grad_
+            );
+
+        if (gradients.size() != inputs.size()) {
+
+            throw std::runtime_error(
+                "Number of gradients does not match "
+                "number of inputs"
+            );
+        }
+
+        for (size_t i = 0;
+             i < inputs.size();
+             ++i) {
+
+            if (inputs[i] == nullptr) {
+                continue;
+            }
+
+            inputs[i]->AddGrad(
+                gradients[i]
+            );
+        }
+    }
+}
+
+Tensor Tensor::SumAxis(int axis) const {
+    return GetBackend(device_).SumAxis(*this, axis);
+}
+
+Tensor Tensor::Mean(int axis) const {
+    return GetBackend(device_).Mean(*this, axis);
+}
+
+void Tensor::SaveTensor(const std::string& path) const {
+    std::ofstream file(path + ".bin", std::ios::binary);
+
+    if (!file.is_open()) {
+        throw std::runtime_error("Cannot open file: " + path + ".bin");
+    }
+    
+    for (size_t i = 0; i < shape_.size(); i++) {
+        file << shape_[i];
+        if (i + 1 < shape_.size()) file << " ";
+    }
+    file << "\n";
+
+    file << std::setprecision(10);
+    for (size_t i = 0; i < size_; i++) {
+        file << data_[i];
+        if (i + 1 < size_) file << " ";
+    }
+    file << "\n";
+}
+
+Tensor Tensor::LoadTensor(const std::string& path) {
+    std::ifstream file(path + ".bin");
+    if (!file.is_open()) {
+        throw std::runtime_error("Cannot open file: " + path + ".bin");
+    }
+
+    std::vector<size_t> shape;
+    size_t dim;
+    while (file.peek() != '\n' && file >> dim) {
+        shape.push_back(dim);
+    }
+    file.ignore();
+
+    std::vector<float> data;
+    float value;
+    while (file >> value) {
+        data.push_back(value);
+    }
+
+    return Tensor(shape, data);
+}
+
+void Tensor::BuildBackwardGraph(std::vector<Tensor*>& graph, std::unordered_set<Tensor*>& visited) {
+    if (visited.find(this) != visited.end()) { return; }
+    visited.insert(this);
+
+    if (grad_fn_ != nullptr) {
+        std::vector<std::shared_ptr<Tensor>> inputs = grad_fn_->GetInputs();
+        for (const auto& input : inputs) {
+            if (input != nullptr) {
+                input->BuildBackwardGraph(graph, visited);
+            }
+        }
+    }
+
+    graph.push_back(this);
+}
+
+size_t Tensor::Numel() const {
+    size_t result = 1;
+
+    for (size_t dim : shape_) {
+        result *= dim;
+    }
+
+    return result;
+}
+    
+Device Tensor::GetDevice() const {
+    return device_;
+}
+
+void Tensor::CopyToCUDA(Tensor& destination) const {
+    if (device_ != Device::CPU) {
+        throw std::runtime_error(
+            "CopyToCUDA: source must be CPU"
+        );
+    }
+
+    if (destination.device_ != Device::CUDA) {
+        throw std::runtime_error(
+            "CopyToCUDA: destination must be CUDA"
+        );
+    }
+
+    if (size_ != destination.size_) {
+        throw std::runtime_error(
+            "CopyToCUDA: size mismatch"
+        );
+    }
+
+    cudaMemcpy(
+        destination.data_,
+        data_,
+        size_ * sizeof(float),
+        cudaMemcpyHostToDevice
+    );
 }
