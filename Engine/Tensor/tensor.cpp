@@ -1,9 +1,6 @@
 #include "tensor.h"
 #include "device.h"
-
-#ifdef __CUDACC__
 #include <cuda_runtime.h>
-#endif
 
 #include <fstream>
 #include <sstream>
