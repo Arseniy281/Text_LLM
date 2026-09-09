@@ -1,5 +1,7 @@
 #include "tensor.h"
 #include "cpu_backend.h"
+#include <climits>
+#include <cstring>
 #ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
 #else
