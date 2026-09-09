@@ -8,7 +8,6 @@
 
 class LanguageModel {
 private:
-    std::mt19937 gen_;
     EmbeddingLayer embedding_;
     Transformer transformer_;
     LinearLayer lm_head_;
