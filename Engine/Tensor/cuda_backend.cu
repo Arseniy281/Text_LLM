@@ -12,11 +12,11 @@ CUDABackend::~CUDABackend() {
     cublasDestroy(handle_);
 }
 
-__global__ void AddKernel(const float* a, const float* b, float* result, size_t size) {
+__global__ void AddKernel(const float* a, const float* b, float* result, size_t size_a, size_t size_b) {
     size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index < size) {
-        result[index] = a[index] + b[index];
-    }
+    if (index >= size_a) { return; }
+    size_t b_index = index % size_b;
+    result[index] = a[index] + b[b_index];
 }
 
 __global__ void SubKernel(const float* a, const float* b, float* result, size_t size) {
@@ -43,45 +43,77 @@ __global__ void DivKernel(const float* a, const float* b, float* result, size_t 
 
 
 Tensor CUDABackend::Add(const Tensor& a, const Tensor& b) const {
-    if (a.GetShape() != b.GetShape()) {
-    std::cerr << "\nCUDABackend::Add shape mismatch:\n";
+    if (a.GetDevice() != b.GetDevice()) {
+        throw std::runtime_error(
+            "CUDABackend::Add: device mismatch"
+        );
+    }
 
-    std::cerr << "A: [";
-    for (size_t i = 0; i < a.GetShape().size(); ++i) {
-        std::cerr << a.GetShape()[i];
-        if (i + 1 < a.GetShape().size()) {
-            std::cerr << ", ";
+    if (a.GetDevice() != Device::CUDA) {
+        throw std::runtime_error(
+            "CUDABackend::Add: expected CUDA tensors"
+        );
+    }
+
+    const std::vector<size_t>& shape_a = a.GetShape();
+    const std::vector<size_t>& shape_b = b.GetShape();
+
+    size_t rank_a = shape_a.size();
+    size_t rank_b = shape_b.size();
+
+    if (rank_b > rank_a) {
+        throw std::runtime_error(
+            "CUDABackend::Add: unsupported broadcast"
+        );
+    }
+
+    for (size_t i = 0; i < rank_b; ++i) {
+        size_t dim_a = shape_a[rank_a - 1 - i];
+        size_t dim_b = shape_b[rank_b - 1 - i];
+
+        if (dim_a != dim_b && dim_b != 1) {
+            throw std::runtime_error(
+                "CUDABackend::Add: shape mismatch"
+            );
         }
     }
-    std::cerr << "]\n";
 
-    std::cerr << "B: [";
-    for (size_t i = 0; i < b.GetShape().size(); ++i) {
-        std::cerr << b.GetShape()[i];
-        if (i + 1 < b.GetShape().size()) {
-            std::cerr << ", ";
-        }
-    }
-    std::cerr << "]\n";
+    Tensor result(shape_a, Device::CUDA);
 
-    throw std::runtime_error(
-        "CUDABackend::Add: shape mismatch"
-    );
-}
-    size_t size = a.GetSize();
-    Tensor result(a.GetShape(), Device::CUDA);
+    size_t size_a = a.GetSize();
+    size_t size_b = b.GetSize();
 
     int threads = 256;
-    int blocks = (size + threads - 1) / threads;
+    int blocks = static_cast<int>(
+        (size_a + threads - 1) / threads
+    );
 
     AddKernel<<<blocks, threads>>>(
         a.Data(),
         b.Data(),
         result.Data(),
-        size
+        size_a,
+        size_b
     );
 
-    cudaDeviceSynchronize();
+    cudaError_t error = cudaGetLastError();
+
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string("CUDABackend::Add kernel failed: ") +
+            cudaGetErrorString(error)
+        );
+    }
+
+    error = cudaDeviceSynchronize();
+
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string("CUDABackend::Add failed: ") +
+            cudaGetErrorString(error)
+        );
+    }
+
     return result;
 }
 
