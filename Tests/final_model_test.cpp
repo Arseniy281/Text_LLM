@@ -17,10 +17,10 @@ const size_t HEADS = 4;
 const size_t HIDDEN = 512;
 
 const std::string MODEL_PATH =
-    "../Models/MargaritaCUDA/best";
+    "/content/Text_LLM/Models/MargaritaCUDA/best";
 
 const std::string TOKENIZER_PATH =
-    "../../../content/Text_LLM/Models/MargaritaTokenizer";
+    "/content/Text_LLM/Models/MargaritaTokenizer";
 
 
 void PrintText(
