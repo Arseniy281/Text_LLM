@@ -148,29 +148,23 @@ std::string LoadText(const std::string& filename) {
 // Tokenizer
 // ============================================================
 
-BPETokenizer PrepareTokenizer(
+void PrepareTokenizer(
+    BPETokenizer& tokenizer,
     const std::string& corpus
 ) {
-    BPETokenizer tokenizer;
-
-    // Если tokenizer уже существует,
-    // просто загружаем его.
     if (std::filesystem::exists(TOKENIZER_PATH)) {
         std::cout
             << "Tokenizer file found.\n"
             << "Loading tokenizer...\n";
 
-        tokenizer.Load(
-            TOKENIZER_PATH
-        );
+        tokenizer.Load(TOKENIZER_PATH);
 
         std::cout
-            << "[OK] Tokenizer loaded.\n";
+            << "[OK] Tokenizer loaded.\n\n";
 
-        return tokenizer;
+        return;
     }
 
-    // Иначе обучаем его один раз.
     std::cout
         << "Tokenizer file not found.\n"
         << "Training BPE tokenizer...\n\n";
@@ -216,8 +210,6 @@ BPETokenizer PrepareTokenizer(
         << "[OK] Tokenizer saved to:\n"
         << TOKENIZER_PATH
         << "\n\n";
-
-    return tokenizer;
 }
 
 // ============================================================
