@@ -1215,88 +1215,192 @@ Tensor CUDABackend::ReLUBackward(const Tensor& input, const Tensor& grad_output)
     return result;
 }
 
-__global__ void RMSNormForwardKernel(const float* input, const float* gamma, float* output,
-        float* x_norm, float* rms, size_t batch, size_t seq_len, size_t embed_dim) {
-
+__global__ void RMSNormForwardKernel(
+    const float* input,
+    const float* gamma,
+    float* output,
+    float* x_norm,
+    float* rms,
+    size_t batch,
+    size_t seq_len,
+    size_t embed_dim
+) {
     size_t row = static_cast<size_t>(blockIdx.x);
-    if (row >= batch * seq_len) { return; }
+
+    if (row >= batch * seq_len) {
+        return;
+    }
+
     const size_t offset = row * embed_dim;
+
     float mean_square = 0.0f;
-    for (size_t i = 0; i < embed_dim; i++) {
-        const float x = input[offset + i];
+
+    for (size_t i = 0; i < embed_dim; ++i) {
+        float x = input[offset + i];
         mean_square += x * x;
     }
 
     mean_square /= static_cast<float>(embed_dim);
-    const float current_rms = sqrtf(mean_square + 1e-6f);
+
+    float current_rms = sqrtf(mean_square + 1e-6f);
 
     rms[row] = current_rms;
-    for (size_t i = 0; i < embed_dim; i++) {
-        const float x = input[offset + i];
-        const float normalized = x / current_rms;
+
+    for (size_t i = 0; i < embed_dim; ++i) {
+        float x = input[offset + i];
+        float normalized = x / current_rms;
+
         x_norm[offset + i] = normalized;
         output[offset + i] = normalized * gamma[i];
     }
 }
 
-__global__ void RMSNormBackwardKernel(const float* input, const float* gamma, const float* x_norm,
-        const float* rms, const float* grad_output, float* grad_x, float* grad_gamma, size_t batch,
-        size_t seq_len, size_t embed_dim) {
-
+__global__ void RMSNormBackwardKernel(
+    const float* input,
+    const float* gamma,
+    const float* x_norm,
+    const float* rms,
+    const float* grad_output,
+    float* grad_x,
+    float* grad_gamma,
+    size_t batch,
+    size_t seq_len,
+    size_t embed_dim
+) {
     size_t row = static_cast<size_t>(blockIdx.x);
-    if (row >= batch * seq_len) { return; }
+
+    if (row >= batch * seq_len) {
+        return;
+    }
 
     const size_t offset = row * embed_dim;
-    const float current_rms = rms[row];
+
+    float current_rms = rms[row];
+
     float mean_term = 0.0f;
 
-    for (size_t i = 0; i < embed_dim; i++) {
-        const float grad_y = grad_output[offset + i];
-        const float current_gamma = gamma[i];
-        const float normalized = x_norm[offset + i];
+    for (size_t i = 0; i < embed_dim; ++i) {
+        float grad_y = grad_output[offset + i];
+        float current_gamma = gamma[i];
+        float normalized = x_norm[offset + i];
 
         mean_term += grad_y * current_gamma * normalized;
     }
 
     mean_term /= static_cast<float>(embed_dim);
 
-    for (size_t i = 0; i < embed_dim; i++) {
-        const float grad_y = grad_output[offset + i];
-        const float current_gamma = gamma[i];
-        const float normalized = x_norm[offset + i];
-        const float grad_normalized = grad_y * current_gamma;
-        grad_x[offset + i] = (grad_normalized - normalized * mean_term) / current_rms;
-    }
+    for (size_t i = 0; i < embed_dim; ++i) {
+        float grad_y = grad_output[offset + i];
+        float current_gamma = gamma[i];
+        float normalized = x_norm[offset + i];
 
-    for (size_t i = 0; i < embed_dim; i++) {
-        const float grad_y = grad_output[offset + i];
-        const float normalized = x_norm[offset + i];
-        atomicAdd(&grad_gamma[i], grad_y * normalized);
+        float grad_normalized = grad_y * current_gamma;
+
+        grad_x[offset + i] =
+            (grad_normalized - normalized * mean_term) /
+            current_rms;
+
+        grad_gamma[i] += grad_y * normalized;
     }
 }
 
-std::vector<Tensor> CUDABackend::RMSNormForward(const Tensor& input, const Tensor& gamma) const {
-    const std::vector<size_t>& input_shape = input.GetShape();
+std::vector<Tensor> CUDABackend::RMSNormForward(
+    const Tensor& input,
+    const Tensor& gamma
+) const {
+
+    const std::vector<size_t>& input_shape =
+        input.GetShape();
+
     if (input_shape.size() != 3) {
-        throw std::runtime_error("CUDABackend::RMSNormForward: input must be 3D");
+        throw std::runtime_error(
+            "CUDABackend::RMSNormForward: "
+            "input must be 3D"
+        );
+    }
+
+    if (input.GetDevice() != Device::CUDA) {
+        throw std::runtime_error(
+            "CUDABackend::RMSNormForward: "
+            "input must be CUDA tensor"
+        );
+    }
+
+    if (gamma.GetDevice() != Device::CUDA) {
+        throw std::runtime_error(
+            "CUDABackend::RMSNormForward: "
+            "gamma must be CUDA tensor"
+        );
     }
 
     const size_t batch = input_shape[0];
     const size_t seq_len = input_shape[1];
     const size_t embed_dim = input_shape[2];
-    const std::vector<size_t>& gamma_shape = gamma.GetShape();
 
-    if (gamma_shape.size() != 1 || gamma_shape[0] != embed_dim) {
-        throw std::runtime_error("CUDABackend::RMSNormForward: invalid gamma shape");
+    const std::vector<size_t>& gamma_shape =
+        gamma.GetShape();
+
+    if (gamma_shape.size() != 1 ||
+        gamma_shape[0] != embed_dim) {
+
+        throw std::runtime_error(
+            "CUDABackend::RMSNormForward: "
+            "invalid gamma shape"
+        );
     }
 
-    Tensor output(input_shape, Device::CUDA);
-    Tensor x_norm(input_shape, Device::CUDA);
-    Tensor rms({batch, seq_len}, Device::CUDA);
+    if (input.GetSize() !=
+        batch * seq_len * embed_dim) {
 
-    const size_t rows = batch * seq_len;
+        throw std::runtime_error(
+            "CUDABackend::RMSNormForward: "
+            "invalid input size"
+        );
+    }
+
+    if (gamma.GetSize() != embed_dim) {
+        throw std::runtime_error(
+            "CUDABackend::RMSNormForward: "
+            "invalid gamma size"
+        );
+    }
+
+    Tensor output(
+        input_shape,
+        Device::CUDA
+    );
+
+    Tensor x_norm(
+        input_shape,
+        Device::CUDA
+    );
+
+    Tensor rms(
+        {batch, seq_len},
+        Device::CUDA
+    );
+
+    const size_t rows =
+        batch * seq_len;
+
     const size_t threads = 1;
     const size_t blocks = rows;
+
+    /*
+     * Проверяем, не находится ли CUDA
+     * уже в состоянии ошибки до RMSNorm.
+     */
+    cudaError_t error = cudaGetLastError();
+
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string(
+                "CUDABackend::RMSNormForward: "
+                "CUDA already in error state: "
+            ) +
+            cudaGetErrorString(error)
+        );
+    }
 
     RMSNormForwardKernel<<<blocks, threads>>>(
         input.Data(),
@@ -1309,31 +1413,69 @@ std::vector<Tensor> CUDABackend::RMSNormForward(const Tensor& input, const Tenso
         embed_dim
     );
 
-    cudaError_t error = cudaGetLastError();
+    error = cudaGetLastError();
 
     if (error != cudaSuccess) {
-        throw std::runtime_error(std::string(
-            "CUDABackend::RMSNormForward: kernel launch failed: ") + cudaGetErrorString(error)
+        throw std::runtime_error(
+            std::string(
+                "CUDABackend::RMSNormForward: "
+                "kernel launch failed: "
+            ) +
+            cudaGetErrorString(error)
         );
     }
 
+    /*
+     * Пока оставляем синхронизацию специально.
+     * Она позволяет точно определить место ошибки.
+     */
     error = cudaDeviceSynchronize();
 
     if (error != cudaSuccess) {
-        throw std::runtime_error(std::string(
-            "CUDABackend::RMSNormForward: kernel execution failed: ") + cudaGetErrorString(error)
+        throw std::runtime_error(
+            std::string(
+                "CUDABackend::RMSNormForward: "
+                "kernel execution failed: "
+            ) +
+            cudaGetErrorString(error)
         );
     }
-    return {std::move(output), std::move(x_norm), std::move(rms)};
+
+    return {
+        std::move(output),
+        std::move(x_norm),
+        std::move(rms)
+    };
 }
 
-std::vector<Tensor> CUDABackend::RMSNormBackward(const Tensor& input, const Tensor& gamma,
-        const Tensor& x_norm, const Tensor& rms, const Tensor& grad_output) const {
+std::vector<Tensor> CUDABackend::RMSNormBackward(
+    const Tensor& input,
+    const Tensor& gamma,
+    const Tensor& x_norm,
+    const Tensor& rms,
+    const Tensor& grad_output
+) const {
 
-    const std::vector<size_t>& input_shape = input.GetShape();
+    const std::vector<size_t>& input_shape =
+        input.GetShape();
 
     if (input_shape.size() != 3) {
-        throw std::runtime_error("CUDABackend::RMSNormBackward: input must be 3D");
+        throw std::runtime_error(
+            "CUDABackend::RMSNormBackward: "
+            "input must be 3D"
+        );
+    }
+
+    if (input.GetDevice() != Device::CUDA ||
+        gamma.GetDevice() != Device::CUDA ||
+        x_norm.GetDevice() != Device::CUDA ||
+        rms.GetDevice() != Device::CUDA ||
+        grad_output.GetDevice() != Device::CUDA) {
+
+        throw std::runtime_error(
+            "CUDABackend::RMSNormBackward: "
+            "all tensors must be CUDA tensors"
+        );
     }
 
     const size_t batch = input_shape[0];
@@ -1341,27 +1483,65 @@ std::vector<Tensor> CUDABackend::RMSNormBackward(const Tensor& input, const Tens
     const size_t embed_dim = input_shape[2];
 
     if (x_norm.GetShape() != input_shape) {
-        throw std::runtime_error("CUDABackend::RMSNormBackward: invalid x_norm shape");
+        throw std::runtime_error(
+            "CUDABackend::RMSNormBackward: "
+            "invalid x_norm shape"
+        );
     }
 
-    if (rms.GetShape() != std::vector<size_t>{batch, seq_len}) {
-        throw std::runtime_error("CUDABackend::RMSNormBackward: invalid rms shape");
+    if (rms.GetShape() !=
+        std::vector<size_t>{batch, seq_len}) {
+
+        throw std::runtime_error(
+            "CUDABackend::RMSNormBackward: "
+            "invalid rms shape"
+        );
     }
 
     if (grad_output.GetShape() != input_shape) {
-        throw std::runtime_error("CUDABackend::RMSNormBackward: invalid grad_output shape");
+        throw std::runtime_error(
+            "CUDABackend::RMSNormBackward: "
+            "invalid grad_output shape"
+        );
     }
 
-    if (gamma.GetShape() != std::vector<size_t>{embed_dim}) {
-        throw std::runtime_error("CUDABackend::RMSNormBackward: invalid gamma shape");
+    if (gamma.GetShape() !=
+        std::vector<size_t>{embed_dim}) {
+
+        throw std::runtime_error(
+            "CUDABackend::RMSNormBackward: "
+            "invalid gamma shape"
+        );
     }
 
-    Tensor grad_x(input_shape, Device::CUDA);
-    Tensor grad_gamma({embed_dim}, 0.0f, Device::CUDA);
+    Tensor grad_x(
+        input_shape,
+        Device::CUDA
+    );
 
-    const size_t rows = batch * seq_len;
+    Tensor grad_gamma(
+        {embed_dim},
+        0.0f,
+        Device::CUDA
+    );
+
+    const size_t rows =
+        batch * seq_len;
+
     const size_t threads = 1;
     const size_t blocks = rows;
+
+    cudaError_t error = cudaGetLastError();
+
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string(
+                "CUDABackend::RMSNormBackward: "
+                "CUDA already in error state: "
+            ) +
+            cudaGetErrorString(error)
+        );
+    }
 
     RMSNormBackwardKernel<<<blocks, threads>>>(
         input.Data(),
@@ -1376,23 +1556,34 @@ std::vector<Tensor> CUDABackend::RMSNormBackward(const Tensor& input, const Tens
         embed_dim
     );
 
-    cudaError_t error = cudaGetLastError();
+    error = cudaGetLastError();
 
     if (error != cudaSuccess) {
-        throw std::runtime_error(std::string(
-            "CUDABackend::RMSNormBackward: kernel launch failed: ") + cudaGetErrorString(error)
+        throw std::runtime_error(
+            std::string(
+                "CUDABackend::RMSNormBackward: "
+                "kernel launch failed: "
+            ) +
+            cudaGetErrorString(error)
         );
     }
 
     error = cudaDeviceSynchronize();
 
     if (error != cudaSuccess) {
-        throw std::runtime_error(std::string(
-            "CUDABackend::RMSNormBackward: kernel execution failed: ") + cudaGetErrorString(error)
+        throw std::runtime_error(
+            std::string(
+                "CUDABackend::RMSNormBackward: "
+                "kernel execution failed: "
+            ) +
+            cudaGetErrorString(error)
         );
     }
 
-    return {std::move(grad_x), std::move(grad_gamma)};
+    return {
+        std::move(grad_x),
+        std::move(grad_gamma)
+    };
 }
 
 __global__ void RoPEForwardKernel(const float* input, float* output, size_t batch,
