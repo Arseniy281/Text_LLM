@@ -2,7 +2,7 @@
 #include "../Engine/Layers/linear_layer.h"
 #include "../Engine/Transformer/transformer.h"
 #include "../Engine/Tokenizer/bpe_tokenizer.h"
-#include "../Engine/Model/language_model.h"
+#include "../Engine/Layers/language_model.h"
 
 #include <cuda_runtime.h>
 
