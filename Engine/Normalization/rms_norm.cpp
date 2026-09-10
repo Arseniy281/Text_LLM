@@ -90,9 +90,11 @@ void RMSNorm::Save(const std::string& path) const {
 }
 
 void RMSNorm::Load(const std::string& path) {
-    *gamma_ = Tensor::LoadTensor(path);
-    *gamma_m_ = Tensor::LoadTensor(path + "_m");
-    *gamma_v_ = Tensor::LoadTensor(path + "_v");
+    Device device = gamma_->GetDevice();
+
+    *gamma_ = Tensor::LoadTensor(path, device);
+    *gamma_m_ = Tensor::LoadTensor(path + "_m", device);
+    *gamma_v_ = Tensor::LoadTensor(path + "_v", device);
 }
 
 float RMSNorm::GetGammaGradNorm() const {
