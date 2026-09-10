@@ -117,9 +117,13 @@ void LanguageModel::TopP(Tensor& last_logits, float top_p) {
     }
 }
 
-std::vector<size_t> LanguageModel::generate(const std::vector<size_t>& prompt,
-        int max_new_tokens, float temperature, float top_p, int end_token_id) {
-
+std::vector<size_t> LanguageModel::generate(
+    const std::vector<size_t>& prompt,
+    int max_new_tokens,
+    float temperature,
+    float top_p,
+    int end_token_id
+) {
     if (prompt.empty() || max_new_tokens <= 0) {
         return {};
     }
@@ -134,10 +138,21 @@ std::vector<size_t> LanguageModel::generate(const std::vector<size_t>& prompt,
     std::shared_ptr<Tensor> output;
 
     for (size_t token : prompt) {
-        auto input = std::make_shared<Tensor>(
-            std::vector<size_t>{1, 1});
 
-        input->at({0, 0}) = static_cast<float>(token);
+        auto input_cpu = std::make_shared<Tensor>(
+            std::vector<size_t>{1, 1}
+        );
+
+        input_cpu->at({0, 0}) = static_cast<float>(token);
+
+        auto input = std::make_shared<Tensor>(
+            std::vector<size_t>{1, 1},
+            0.0f,
+            device_
+        );
+
+        input_cpu->CopyToCUDA(*input);
+
         output = forward(input);
     }
 
@@ -145,25 +160,57 @@ std::vector<size_t> LanguageModel::generate(const std::vector<size_t>& prompt,
     generated.reserve(max_new_tokens);
 
     for (int step = 0; step < max_new_tokens; step++) {
-        size_t last_position = output->GetShape()[1] - 1;
-        Tensor probs({vocab_size_}, 0.0f, output->GetDevice());
 
-        float max_logit = output->at({0, last_position, 0});
+        size_t last_position =
+            output->GetShape()[1] - 1;
+
+        // ----------------------------------------------------
+        // CUDA -> CPU: забираем logits последней позиции
+        // ----------------------------------------------------
+
+        Tensor logits(
+            {vocab_size_},
+            0.0f,
+            Device::CPU
+        );
+
+        cudaMemcpy(
+            logits.Data(),
+            output->Data() +
+                last_position * vocab_size_,
+            vocab_size_ * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+        // ----------------------------------------------------
+        // Softmax на CPU
+        // ----------------------------------------------------
+
+        float max_logit = logits.at(0);
 
         for (size_t i = 1; i < vocab_size_; i++) {
-            float value = output->at({0, last_position, i});
+
+            float value = logits.at(i);
 
             if (value > max_logit) {
                 max_logit = value;
             }
         }
 
+        Tensor probs(
+            {vocab_size_},
+            0.0f,
+            Device::CPU
+        );
+
         float sum = 0.0f;
 
         for (size_t i = 0; i < vocab_size_; i++) {
-            float value =
-                std::exp((output->at({
-                    0, last_position, i}) - max_logit) / temperature);
+
+            float value = std::exp(
+                (logits.at(i) - max_logit) /
+                temperature
+            );
 
             probs.at(i) = value;
             sum += value;
@@ -180,23 +227,50 @@ std::vector<size_t> LanguageModel::generate(const std::vector<size_t>& prompt,
             probs.at(i) /= sum;
         }
 
+        // ----------------------------------------------------
+        // Top-P на CPU
+        // ----------------------------------------------------
+
         if (top_p > 0.0f && top_p < 1.0f) {
             TopP(probs, top_p);
         }
 
-        size_t next_token = static_cast<size_t>(SampleGreedy(probs));
+        // ----------------------------------------------------
+        // Выбираем следующий токен
+        // ----------------------------------------------------
 
-        if (end_token_id >= 0 && next_token == static_cast<size_t>(end_token_id)) {
+        size_t next_token =
+            static_cast<size_t>(SampleGreedy(probs));
+
+        if (
+            end_token_id >= 0 &&
+            next_token == static_cast<size_t>(end_token_id)
+        ) {
             break;
         }
 
         generated.push_back(next_token);
 
-        auto next_input = std::make_shared<Tensor>(
-            std::vector<size_t>{1, 1}
-        );
+        // ----------------------------------------------------
+        // Следующий input снова отправляем на CUDA
+        // ----------------------------------------------------
 
-        next_input->at({0, 0}) = static_cast<float>(next_token);
+        auto next_input_cpu =
+            std::make_shared<Tensor>(
+                std::vector<size_t>{1, 1}
+            );
+
+        next_input_cpu->at({0, 0}) =
+            static_cast<float>(next_token);
+
+        auto next_input =
+            std::make_shared<Tensor>(
+                std::vector<size_t>{1, 1},
+                0.0f,
+                device_
+            );
+
+        next_input_cpu->CopyToCUDA(*next_input);
 
         output = forward(next_input);
     }
