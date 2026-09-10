@@ -106,7 +106,7 @@ add_executable(attention_test
     ../../Engine/Tokenizer/bpe_tokenizer.cpp
     ../../Engine/Tokenizer/trie.cpp
 
-    attention.cpp
+    attention_test.cpp
 )
 
 setup_target(attention_test)
