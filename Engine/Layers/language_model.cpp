@@ -208,13 +208,43 @@ std::vector<size_t> LanguageModel::generate(const std::vector<size_t>& prompt,
 }
 
 void LanguageModel::SaveModel(const std::string& folder) {
+    std::cout << "[SAVE] Creating directory: "
+              << folder << "\n";
+    std::cout.flush();
+
     std::filesystem::create_directories(folder);
 
+    std::cout << "[SAVE] Saving embedding...\n";
+    std::cout.flush();
+
     embedding_.Save(folder + "/embedding");
+
+    std::cout << "[SAVE] Embedding saved.\n";
+    std::cout.flush();
+
+    std::cout << "[SAVE] Saving transformer...\n";
+    std::cout.flush();
+
     transformer_.Save(folder);
+
+    std::cout << "[SAVE] Transformer saved.\n";
+    std::cout.flush();
+
+    std::cout << "[SAVE] Saving lm_head...\n";
+    std::cout.flush();
+
     lm_head_.Save(folder, "lm_head");
 
-    std::ofstream file(folder + "/adam_step", std::ios::binary);
+    std::cout << "[SAVE] LM head saved.\n";
+    std::cout.flush();
+
+    std::cout << "[SAVE] Saving adam_step...\n";
+    std::cout.flush();
+
+    std::ofstream file(
+        folder + "/adam_step",
+        std::ios::binary
+    );
 
     if (!file) {
         throw std::runtime_error(
@@ -234,6 +264,9 @@ void LanguageModel::SaveModel(const std::string& folder) {
             "failed to save adam_step"
         );
     }
+
+    std::cout << "[SAVE] adam_step saved.\n";
+    std::cout.flush();
 }
 
 void LanguageModel::LoadModel(const std::string& folder) {
