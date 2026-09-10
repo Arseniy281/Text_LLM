@@ -87,35 +87,74 @@ int LanguageModel::SampleGreedy(const Tensor& probs) {
 }
 
 
-void LanguageModel::TopP(Tensor& last_logits, float top_p) {
-    std::vector<std::pair<float, int>> indexed_probs;
-    for (size_t i = 0; i < vocab_size_; i++) {
-        indexed_probs.push_back({last_logits.at(i), i});
+void LanguageModel::TopP(
+    Tensor& probs,
+    float top_p
+) {
+    if (top_p <= 0.0f || top_p >= 1.0f) {
+        return;
     }
-    std::sort(indexed_probs.begin(), indexed_probs.end(), [](const auto& a, const auto& b){
-            return a.first > b.first; 
+
+    std::vector<std::pair<float, int>> indexed_probs;
+
+    indexed_probs.reserve(vocab_size_);
+
+    for (size_t i = 0; i < vocab_size_; ++i) {
+        indexed_probs.push_back({
+            probs.at(i),
+            static_cast<int>(i)
         });
-    float total_out = 0.0f;
-    size_t border = vocab_size_ - 1;
-    for (size_t i = 0; i < vocab_size_; i++) {
-        total_out += indexed_probs[i].first;
-        if (total_out >= top_p) { 
-            border = i;
+    }
+
+    std::sort(
+        indexed_probs.begin(),
+        indexed_probs.end(),
+        [](const auto& a, const auto& b) {
+            return a.first > b.first;
+        }
+    );
+
+    float cumulative = 0.0f;
+    size_t border = 0;
+
+    for (size_t i = 0; i < indexed_probs.size(); ++i) {
+
+        cumulative += indexed_probs[i].first;
+
+        border = i;
+
+        if (cumulative >= top_p) {
             break;
         }
     }
-    for (size_t i = border + 1; i < vocab_size_; i++) {
-        last_logits.at(indexed_probs[i].second) = 0.0f;
+
+    for (size_t i = border + 1;
+         i < indexed_probs.size();
+         ++i) {
+
+        probs.at(
+            static_cast<size_t>(indexed_probs[i].second)
+        ) = 0.0f;
     }
 
     float sum = 0.0f;
-    for (size_t i = 0; i <= border; i++) {
+
+    for (size_t i = 0; i <= border; ++i) {
         sum += indexed_probs[i].first;
     }
-    if (sum > 0.0f) {
-        for (size_t i = 0; i <= border; i++) {
-            last_logits.at(indexed_probs[i].second) = indexed_probs[i].first / sum;
-        }
+
+    if (sum <= 0.0f || !std::isfinite(sum)) {
+        throw std::runtime_error(
+            "LanguageModel::TopP: invalid probability sum"
+        );
+    }
+
+    for (size_t i = 0; i <= border; ++i) {
+
+        probs.at(
+            static_cast<size_t>(indexed_probs[i].second)
+        ) =
+            indexed_probs[i].first / sum;
     }
 }
 
@@ -332,12 +371,25 @@ std::vector<size_t> LanguageModel::generate(
             TopP(probs, top_p);
         }
 
+        float probability_sum = 0.0f;
+
+        for (size_t i = 0; i < vocab_size_; ++i) {
+            probability_sum += probs.at(i);
+        }
+
+        if (!std::isfinite(probability_sum)) {
+            throw std::runtime_error(
+                "LanguageModel::generate: "
+                "probabilities became NaN/Inf after TopP"
+            );
+        }
+
         // ====================================================
         // SAMPLING
         // ====================================================
 
         size_t next_token =
-            static_cast<size_t>(SampleGreedy(probs));
+            static_cast<size_t>(Sample(probs));
 
         if (
             end_token_id >= 0 &&

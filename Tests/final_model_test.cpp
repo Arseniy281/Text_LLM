@@ -1,95 +1,100 @@
 #include "../Engine/Layers/language_model.h"
+#include "../Engine/Layers/ce_loss.h"
 #include "../Engine/Tokenizer/bpe_tokenizer.h"
 #include "../Engine/Tensor/tensor.h"
+#include "../Engine/Tensor/device.h"
 
 #include <cuda_runtime.h>
 
 #include <iostream>
 #include <vector>
-#include <string>
+#include <cmath>
+#include <fstream>
+#include <random>
+#include <iomanip>
 #include <stdexcept>
-#include <filesystem>
+
+// ============================================================
+// Настройки
+// ============================================================
 
 const size_t VOCAB_SIZE = 1000;
+
 const size_t EMBED_DIM = 128;
 const size_t BLOCKS = 4;
 const size_t HEADS = 4;
 const size_t HIDDEN = 512;
 
-const std::string TOKENIZER_PATH =
-    "/content/Text_LLM/Models/MargaritaTokenizer";
+const size_t CONTEXT = 128;
 
-const std::string MODEL_PATH =
-    "/content/Text_LLM/Models/MargaritaCUDA/best";
+const size_t BATCH_SIZE = 8;
+const size_t STEPS = 5000;
 
+const float LR = 0.001f;
 
-void PrintText(
-    const std::string& prompt,
-    const std::vector<size_t>& generated,
-    BPETokenizer& tokenizer
-) {
-    std::string generated_text = tokenizer.Decode(generated);
+const std::string DATA_PATH =
+    "../Data/master_and_margarita.txt";
 
-    std::cout
-        << "\n========================================\n"
-        << "PROMPT\n"
-        << "========================================\n";
+// ============================================================
+// CUDA scalar -> CPU
+// ============================================================
 
-    std::cout << prompt << "\n";
+float GetScalar(const Tensor& tensor) {
 
-    std::cout
-        << "\n========================================\n"
-        << "GENERATED\n"
-        << "========================================\n";
-
-    std::cout << generated_text << "\n";
-
-    std::cout
-        << "\nGenerated tokens: "
-        << generated.size()
-        << "\n";
-}
-
-
-std::vector<size_t> EncodePrompt(
-    BPETokenizer& tokenizer,
-    const std::string& prompt
-) {
-    std::vector<size_t> tokens = tokenizer.Encode(prompt);
-
-    if (tokens.empty()) {
+    if (tensor.GetSize() != 1) {
         throw std::runtime_error(
-            "Prompt produced no tokens: " + prompt
+            "GetScalar: tensor must contain exactly one value"
         );
     }
 
-    std::cout
-        << "Prompt tokens: "
-        << tokens.size()
-        << "\n";
+    if (tensor.GetDevice() == Device::CPU) {
+        return tensor.at(0);
+    }
 
-    return tokens;
+    float value = 0.0f;
+
+    cudaError_t error = cudaMemcpy(
+        &value,
+        tensor.Data(),
+        sizeof(float),
+        cudaMemcpyDeviceToHost
+    );
+
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string("GetScalar cudaMemcpy failed: ") +
+            cudaGetErrorString(error)
+        );
+    }
+
+    return value;
 }
 
+// ============================================================
+// Main
+// ============================================================
 
 int main() {
+
     try {
+
         std::cout
             << "========================================\n"
-            << "       MARGARITA CUDA GENERATION TEST\n"
+            << "     RANDOM WINDOW CUDA MODEL TEST\n"
             << "========================================\n\n";
+
+        // ----------------------------------------------------
+        // CUDA
+        // ----------------------------------------------------
 
         int device_count = 0;
 
-        cudaError_t error =
-            cudaGetDeviceCount(&device_count);
+        cudaGetDeviceCount(&device_count);
 
-        if (error != cudaSuccess) {
-            throw std::runtime_error(
-                std::string("cudaGetDeviceCount failed: ") +
-                cudaGetErrorString(error)
-            );
-        }
+        std::cout
+            << "CUDA devices: "
+            << device_count
+            << "\n";
 
         if (device_count == 0) {
             throw std::runtime_error(
@@ -97,53 +102,91 @@ int main() {
             );
         }
 
-        cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, 0);
+        cudaDeviceProp properties{};
+
+        cudaGetDeviceProperties(
+            &properties,
+            0
+        );
 
         std::cout
             << "GPU: "
-            << prop.name
+            << properties.name
             << "\n\n";
 
-
-        if (!std::filesystem::exists(MODEL_PATH)) {
-            throw std::runtime_error(
-                "Model directory not found: " +
-                MODEL_PATH
-            );
-        }
-
-        if (!std::filesystem::exists(TOKENIZER_PATH)) {
-            throw std::runtime_error(
-                "Tokenizer file not found: " +
-                TOKENIZER_PATH
-            );
-        }
-
+        // ----------------------------------------------------
+        // Load book
+        // ----------------------------------------------------
 
         std::cout
-            << "Loading tokenizer...\n";
+            << "========================================\n"
+            << "          LOADING TEXT\n"
+            << "========================================\n";
+
+        std::ifstream file(DATA_PATH);
+
+        if (!file) {
+            throw std::runtime_error(
+                "Cannot open: " + DATA_PATH
+            );
+        }
+
+        std::string text(
+            (std::istreambuf_iterator<char>(file)),
+            std::istreambuf_iterator<char>()
+        );
+
+        std::cout
+            << "Text size: "
+            << text.size()
+            << " characters\n\n";
+
+        // ----------------------------------------------------
+        // Tokenizer
+        // ----------------------------------------------------
+
+        std::cout
+            << "========================================\n"
+            << "           TOKENIZATION\n"
+            << "========================================\n";
 
         BPETokenizer tokenizer;
 
-        tokenizer.Load(TOKENIZER_PATH);
+        tokenizer.Train(
+            text,
+            VOCAB_SIZE
+        );
+
+        std::vector<size_t> tokens =
+            tokenizer.Encode(text);
 
         std::cout
-            << "[OK] Tokenizer loaded.\n"
-            << "Vocab size: "
-            << tokenizer.GetVocabSize()
-            << "\n\n";
+            << "Tokens: "
+            << tokens.size()
+            << "\n";
 
-
-        if (tokenizer.GetVocabSize() != VOCAB_SIZE) {
+        if (tokens.size() <= CONTEXT) {
             throw std::runtime_error(
-                "Tokenizer vocab size does not match model"
+                "Not enough tokens for training"
             );
         }
 
+        size_t max_start =
+            tokens.size() - CONTEXT - 1;
 
         std::cout
-            << "Creating CUDA model...\n";
+            << "Possible windows: "
+            << max_start + 1
+            << "\n\n";
+
+        // ----------------------------------------------------
+        // Model
+        // ----------------------------------------------------
+
+        std::cout
+            << "========================================\n"
+            << "             MODEL\n"
+            << "========================================\n";
 
         LanguageModel model(
             VOCAB_SIZE,
@@ -154,91 +197,294 @@ int main() {
             Device::CUDA
         );
 
-        std::cout
-            << "[OK] Model created.\n\n";
+        // KV cache во время обучения не нужен.
+        model.SetUseKVCache(false);
 
+        CrossEntropyLoss loss;
 
         std::cout
-            << "Loading model:\n"
-            << MODEL_PATH
+            << "Vocabulary: "
+            << VOCAB_SIZE
             << "\n";
 
-        model.LoadModel(MODEL_PATH);
-
-        cudaDeviceSynchronize();
+        std::cout
+            << "Embedding: "
+            << EMBED_DIM
+            << "\n";
 
         std::cout
-            << "[OK] Model loaded.\n\n";
+            << "Blocks: "
+            << BLOCKS
+            << "\n";
 
+        std::cout
+            << "Heads: "
+            << HEADS
+            << "\n";
 
-        std::vector<std::string> prompts = {
-            "The Master and Margarita",
-            "Margarita",
-            "Pontius Pilate",
-            "The professor said"
-        };
+        std::cout
+            << "Hidden: "
+            << HIDDEN
+            << "\n";
 
+        std::cout
+            << "Context: "
+            << CONTEXT
+            << "\n";
 
-        for (size_t i = 0; i < prompts.size(); ++i) {
+        std::cout
+            << "Steps: "
+            << STEPS
+            << "\n";
 
-            std::cout
-                << "\n########################################\n"
-                << "TEST "
-                << (i + 1)
-                << " / "
-                << prompts.size()
-                << "\n"
-                << "########################################\n";
+        std::cout
+            << "Learning rate: "
+            << LR
+            << "\n\n";
 
-            const std::string& prompt = prompts[i];
+        // ----------------------------------------------------
+        // Random generator
+        // ----------------------------------------------------
 
-            std::cout
-                << "\nEncoding prompt:\n"
-                << prompt
-                << "\n";
+        std::mt19937 generator(42);
 
-            std::vector<size_t> tokens =
-                EncodePrompt(tokenizer, prompt);
+        std::uniform_int_distribution<size_t> distribution(
+            0,
+            max_start
+        );
 
+        // ----------------------------------------------------
+        // Training
+        // ----------------------------------------------------
 
-            std::cout
-                << "Generating 200 tokens...\n";
+        std::cout
+            << "========================================\n"
+            << "             TRAINING\n"
+            << "========================================\n\n";
 
-            std::vector<size_t> generated =
-                model.generate(
-                    tokens,
-                    200,
-                    1.0f,
-                    1.0f,
-                    -1
+        float initial_loss = -1.0f;
+        float last_loss = -1.0f;
+
+        double loss_sum = 0.0;
+
+        for (size_t step = 0;
+             step < STEPS;
+             ++step) {
+
+            // ------------------------------------------------
+            // Выбираем случайное окно
+            // ------------------------------------------------
+
+            // ------------------------------------------------
+            // Выбираем BATCH_SIZE случайных окон
+            // ------------------------------------------------
+
+            std::vector<float> input_data(
+                BATCH_SIZE * CONTEXT
+            );
+
+            std::vector<float> target_data(
+                BATCH_SIZE * CONTEXT
+            );
+
+            std::vector<size_t> starts(
+                BATCH_SIZE
+            );
+
+            for (size_t b = 0;
+                b < BATCH_SIZE;
+                ++b) {
+
+                starts[b] =
+                    distribution(generator);
+
+                for (size_t i = 0;
+                    i < CONTEXT;
+                    ++i) {
+
+                    input_data[b * CONTEXT + i] =
+                        static_cast<float>(
+                            tokens[starts[b] + i]
+                        );
+
+                    target_data[b * CONTEXT + i] =
+                        static_cast<float>(
+                            tokens[starts[b] + i + 1]
+                        );
+                }
+            }
+
+            // ------------------------------------------------
+            // CPU tensors
+            // ------------------------------------------------
+
+            Tensor input_cpu(
+                {BATCH_SIZE, CONTEXT},
+                std::move(input_data)
+            );
+
+            Tensor target_cpu(
+                {BATCH_SIZE, CONTEXT},
+                std::move(target_data)
+            );
+
+            // ------------------------------------------------
+            // CUDA tensors
+            // ------------------------------------------------
+
+            Tensor input(
+                {BATCH_SIZE, CONTEXT},
+                Device::CUDA
+            );
+
+            Tensor target(
+                {BATCH_SIZE, CONTEXT},
+                Device::CUDA
+            );
+
+            input_cpu.CopyToCUDA(input);
+            target_cpu.CopyToCUDA(target);
+
+            // ------------------------------------------------
+            // Forward
+            // ------------------------------------------------
+
+            model.ClearGrad();
+
+            auto input_ptr =
+                std::make_shared<Tensor>(
+                    std::move(input)
                 );
 
-            cudaDeviceSynchronize();
+            auto logits =
+                model.forward(input_ptr);
 
-            PrintText(
-                prompt,
-                generated,
-                tokenizer
+            Tensor current_loss =
+                loss.forward(
+                    *logits,
+                    target
+                );
+
+            float loss_value =
+                GetScalar(current_loss);
+
+            // ------------------------------------------------
+            // Backward
+            // ------------------------------------------------
+
+            Tensor loss_grad =
+                loss.backward();
+
+            logits->backward(
+                loss_grad
             );
+
+            // ------------------------------------------------
+            // Update
+            // ------------------------------------------------
+
+            model.Update(LR);
+
+            // ------------------------------------------------
+            // Statistics
+            // ------------------------------------------------
+
+            if (step == 0) {
+                initial_loss =
+                    loss_value;
+            }
+
+            last_loss =
+                loss_value;
+
+            loss_sum +=
+                loss_value;
+
+            // ------------------------------------------------
+            // Logging
+            // ------------------------------------------------
+
+            if (step % 100 == 0 ||
+                step == STEPS - 1) {
+
+                double average_loss =
+                    loss_sum /
+                    static_cast<double>(
+                        step + 1
+                    );
+
+                std::cout
+                    << "Step "
+                    << std::setw(4)
+                    << step
+                    << " | Loss: "
+                    << std::fixed
+                    << std::setprecision(6)
+                    << loss_value
+                    << " | Avg: "
+                    << average_loss
+                    << "\n";
+            }
         }
 
+        // ----------------------------------------------------
+        // Result
+        // ----------------------------------------------------
 
         std::cout
             << "\n========================================\n"
-            << "          GENERATION TEST PASSED\n"
+            << "               RESULT\n"
             << "========================================\n";
 
-    } catch (const std::exception& e) {
+        std::cout
+            << "Initial loss: "
+            << initial_loss
+            << "\n";
+
+        std::cout
+            << "Final loss:   "
+            << last_loss
+            << "\n";
+
+        std::cout
+            << "Loss change:  "
+            << last_loss - initial_loss
+            << "\n";
+
+        if (!std::isfinite(initial_loss) ||
+            !std::isfinite(last_loss)) {
+
+            std::cout
+                << "\n[FAIL] Loss contains NaN or Inf\n";
+
+            return 1;
+        }
+
+        if (last_loss >= initial_loss) {
+
+            std::cout
+                << "\n[WARNING] Loss did not decrease.\n";
+
+        } else {
+
+            std::cout
+                << "\n[OK] Loss decreased.\n";
+        }
+
+        std::cout
+            << "\n========================================\n"
+            << " RANDOM WINDOW TRAINING FINISHED\n"
+            << "========================================\n";
+
+        return 0;
+    }
+    catch (const std::exception& exception) {
 
         std::cerr
-            << "\n========================================\n"
-            << "               ERROR\n"
-            << "========================================\n"
-            << e.what()
+            << "\n[ERROR] "
+            << exception.what()
             << "\n";
 
         return 1;
     }
-
-    return 0;
 }
