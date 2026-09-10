@@ -16,11 +16,11 @@ const size_t BLOCKS = 4;
 const size_t HEADS = 4;
 const size_t HIDDEN = 512;
 
-const std::string MODEL_PATH =
-    "/content/Text_LLM/Models/MargaritaCUDA/best";
-
 const std::string TOKENIZER_PATH =
     "/content/Text_LLM/Models/MargaritaTokenizer";
+
+const std::string MODEL_PATH =
+    "/content/Text_LLM/Models/MargaritaCUDA/best";
 
 
 void PrintText(
