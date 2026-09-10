@@ -476,7 +476,6 @@ int main() {
             << " RANDOM WINDOW TRAINING FINISHED\n"
             << "========================================\n";
 
-        return 0;
 
         const std::string MODEL_PATH = "../Models/MargaritaCUDA/step_5000";
 
@@ -497,6 +496,7 @@ int main() {
             << MODEL_PATH
 
             << "\n";
+        return 0;
     }
     catch (const std::exception& exception) {
 
