@@ -180,7 +180,6 @@ int main() {
         std::vector<float> expected_v =
             initial_v;
 
-        // Первый шаг
         AdamWCPU(
             expected_parameter,
             expected_m,
@@ -267,7 +266,7 @@ int main() {
         cudaDeviceSynchronize();
 
         // ====================================================
-        // Копируем результаты на CPU
+        // Копируем результаты CUDA → CPU
         // ====================================================
 
         Tensor parameter_result(
@@ -285,9 +284,26 @@ int main() {
             Device::CPU
         );
 
-        parameter.CopyToCPU(parameter_result);
-        m.CopyToCPU(m_result);
-        v.CopyToCPU(v_result);
+        cudaMemcpy(
+            parameter_result.Data(),
+            parameter.Data(),
+            3 * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+        cudaMemcpy(
+            m_result.Data(),
+            m.Data(),
+            3 * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+        cudaMemcpy(
+            v_result.Data(),
+            v.Data(),
+            3 * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
 
         std::vector<float> actual_parameter(3);
         std::vector<float> actual_m(3);
@@ -351,7 +367,6 @@ int main() {
 
         std::cout << "\nRunning AdamW step 2...\n";
 
-        // CPU expected продолжает состояние
         AdamWCPU(
             expected_parameter,
             expected_m,
@@ -379,9 +394,30 @@ int main() {
 
         cudaDeviceSynchronize();
 
-        parameter.CopyToCPU(parameter_result);
-        m.CopyToCPU(m_result);
-        v.CopyToCPU(v_result);
+        // ====================================================
+        // CUDA → CPU
+        // ====================================================
+
+        cudaMemcpy(
+            parameter_result.Data(),
+            parameter.Data(),
+            3 * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+        cudaMemcpy(
+            m_result.Data(),
+            m.Data(),
+            3 * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+        cudaMemcpy(
+            v_result.Data(),
+            v.Data(),
+            3 * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
 
         for (size_t i = 0; i < 3; ++i) {
             actual_parameter[i] =
