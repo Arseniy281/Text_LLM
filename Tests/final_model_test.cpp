@@ -1,29 +1,74 @@
 #include "../Engine/Layers/language_model.h"
 #include "../Engine/Layers/ce_loss.h"
+#include "../Engine/Tokenizer/bpe_tokenizer.h"
+#include "../Engine/Tensor/tensor.h"
+#include "../Engine/Tensor/device.h"
 
 #include <cuda_runtime.h>
 
-#include <cmath>
-#include <iostream>
-#include <vector>
-#include <memory>
-#include <stdexcept>
 #include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <random>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 // ============================================================
-// Настройки
+// Настройки модели
 // ============================================================
 
 const size_t VOCAB_SIZE = 1000;
-const size_t EMBED_DIM = 32;
-const size_t BLOCKS = 2;
-const size_t HEADS = 2;
-const size_t HIDDEN = 64;
 
-const size_t BATCH_SIZE = 4;
-const size_t CONTEXT = 16;
+const size_t EMBED_DIM = 128;
+const size_t BLOCKS = 4;
+const size_t HEADS = 4;
+const size_t HIDDEN = 512;
+
+const size_t CONTEXT = 128;
+const size_t BATCH_SIZE = 8;
+
+// ============================================================
+// Настройки обучения
+// ============================================================
+
+const size_t STEPS = 20000;
 
 const float LR = 0.001f;
+const float BETA1 = 0.9f;
+const float BETA2 = 0.999f;
+const float EPS = 1e-8f;
+const float WEIGHT_DECAY = 0.01f;
+
+// ============================================================
+// Logging
+// ============================================================
+
+const size_t LOG_EVERY = 100;
+const size_t VALIDATE_EVERY = 500;
+const size_t CHECKPOINT_EVERY = 2000;
+
+// Сколько random validation batch'ей использовать.
+// Не нужно гонять весь корпус для validation.
+const size_t VALIDATION_BATCHES = 20;
+
+// ============================================================
+// Пути
+// ============================================================
+
+const std::string CORPUS_PATH =
+    "../Data/master_and_margarita.txt";
+
+const std::string TOKENIZER_PATH =
+    "../Models/MargaritaTokenizer";
+
+const std::string CHECKPOINT_DIR =
+    "../Models/MargaritaCUDA";
 
 // ============================================================
 // CUDA -> CPU
@@ -58,53 +103,132 @@ std::vector<float> CopyToCPU(const Tensor& tensor) {
 }
 
 // ============================================================
-// L2 difference
+// Scalar Tensor -> float
 // ============================================================
 
-float DifferenceNorm(
-    const std::vector<float>& a,
-    const std::vector<float>& b
-) {
-    if (a.size() != b.size()) {
+float GetScalar(const Tensor& tensor) {
+    auto values = CopyToCPU(tensor);
+
+    if (values.empty()) {
         throw std::runtime_error(
-            "DifferenceNorm: size mismatch"
+            "GetScalar: tensor is empty"
         );
     }
 
-    float sum = 0.0f;
-
-    for (size_t i = 0; i < a.size(); ++i) {
-        float diff = a[i] - b[i];
-        sum += diff * diff;
-    }
-
-    return std::sqrt(sum);
+    return values[0];
 }
 
 // ============================================================
-// Max difference
+// Загрузка текста
 // ============================================================
 
-float MaxDifference(
-    const std::vector<float>& a,
-    const std::vector<float>& b
-) {
-    if (a.size() != b.size()) {
+std::string LoadText(const std::string& filename) {
+    std::ifstream file(filename);
+
+    if (!file) {
         throw std::runtime_error(
-            "MaxDifference: size mismatch"
+            "Cannot open corpus: " + filename
         );
     }
 
-    float result = 0.0f;
+    std::string text(
+        (std::istreambuf_iterator<char>(file)),
+        std::istreambuf_iterator<char>()
+    );
 
-    for (size_t i = 0; i < a.size(); ++i) {
-        result = std::max(
-            result,
-            std::fabs(a[i] - b[i])
+    if (text.empty()) {
+        throw std::runtime_error(
+            "Corpus is empty"
         );
     }
 
-    return result;
+    return text;
+}
+
+// ============================================================
+// Создание CUDA batch
+// ============================================================
+
+void CreateBatch(
+    const std::vector<size_t>& tokens,
+    size_t begin,
+    size_t end,
+    std::mt19937& generator,
+    Tensor& input,
+    Tensor& target
+) {
+    if (end <= begin) {
+        throw std::runtime_error(
+            "CreateBatch: invalid token range"
+        );
+    }
+
+    const size_t available =
+        end - begin;
+
+    if (available <= CONTEXT) {
+        throw std::runtime_error(
+            "CreateBatch: not enough tokens"
+        );
+    }
+
+    const size_t max_start =
+        available - CONTEXT - 1;
+
+    std::uniform_int_distribution<size_t> distribution(
+        0,
+        max_start
+    );
+
+    std::vector<float> input_data(
+        BATCH_SIZE * CONTEXT
+    );
+
+    std::vector<float> target_data(
+        BATCH_SIZE * CONTEXT
+    );
+
+    for (size_t b = 0; b < BATCH_SIZE; ++b) {
+        size_t start =
+            begin + distribution(generator);
+
+        for (size_t i = 0; i < CONTEXT; ++i) {
+            input_data[
+                b * CONTEXT + i
+            ] = static_cast<float>(
+                tokens[start + i]
+            );
+
+            target_data[
+                b * CONTEXT + i
+            ] = static_cast<float>(
+                tokens[start + i + 1]
+            );
+        }
+    }
+
+    Tensor input_cpu(
+        {BATCH_SIZE, CONTEXT},
+        std::move(input_data)
+    );
+
+    Tensor target_cpu(
+        {BATCH_SIZE, CONTEXT},
+        std::move(target_data)
+    );
+
+    input = Tensor(
+        {BATCH_SIZE, CONTEXT},
+        Device::CUDA
+    );
+
+    target = Tensor(
+        {BATCH_SIZE, CONTEXT},
+        Device::CUDA
+    );
+
+    input_cpu.CopyToCUDA(input);
+    target_cpu.CopyToCUDA(target);
 }
 
 // ============================================================
@@ -113,6 +237,7 @@ float MaxDifference(
 
 float TrainStep(
     LanguageModel& model,
+    CrossEntropyLoss& loss,
     Tensor& input,
     Tensor& target
 ) {
@@ -123,8 +248,6 @@ float TrainStep(
 
     auto logits =
         model.forward(input_ptr);
-
-    CrossEntropyLoss loss;
 
     Tensor loss_value =
         loss.forward(
@@ -141,14 +264,94 @@ float TrainStep(
 
     cudaDeviceSynchronize();
 
-    auto loss_cpu =
-        CopyToCPU(loss_value);
+    float value =
+        GetScalar(loss_value);
 
-    model.UpdateAdamW(LR);
+    model.UpdateAdamW(
+        LR,
+        BETA1,
+        BETA2,
+        EPS,
+        WEIGHT_DECAY
+    );
 
     cudaDeviceSynchronize();
 
-    return loss_cpu[0];
+    if (!std::isfinite(value)) {
+        throw std::runtime_error(
+            "Training loss became NaN or Inf"
+        );
+    }
+
+    return value;
+}
+
+// ============================================================
+// Validation
+// ============================================================
+
+float Validate(
+    LanguageModel& model,
+    CrossEntropyLoss& loss,
+    const std::vector<size_t>& tokens,
+    size_t begin,
+    size_t end,
+    std::mt19937& generator
+) {
+    double total_loss = 0.0;
+
+    for (size_t i = 0; i < VALIDATION_BATCHES; ++i) {
+        Tensor input(
+            {BATCH_SIZE, CONTEXT},
+            Device::CUDA
+        );
+
+        Tensor target(
+            {BATCH_SIZE, CONTEXT},
+            Device::CUDA
+        );
+
+        CreateBatch(
+            tokens,
+            begin,
+            end,
+            generator,
+            input,
+            target
+        );
+
+        model.ClearGrad();
+
+        auto input_ptr =
+            std::make_shared<Tensor>(input);
+
+        auto logits =
+            model.forward(input_ptr);
+
+        Tensor loss_value =
+            loss.forward(
+                *logits,
+                target
+            );
+
+        cudaDeviceSynchronize();
+
+        float value =
+            GetScalar(loss_value);
+
+        if (!std::isfinite(value)) {
+            throw std::runtime_error(
+                "Validation loss became NaN or Inf"
+            );
+        }
+
+        total_loss += value;
+    }
+
+    return static_cast<float>(
+        total_loss /
+        static_cast<double>(VALIDATION_BATCHES)
+    );
 }
 
 // ============================================================
@@ -159,7 +362,7 @@ int main() {
     try {
         std::cout
             << "========================================\n"
-            << "       ADAMW MODEL INTEGRATION TEST\n"
+            << "     MARGARITA CUDA TRAINING\n"
             << "========================================\n\n";
 
         // ====================================================
@@ -187,11 +390,16 @@ int main() {
         cudaDeviceProp prop;
 
         error =
-            cudaGetDeviceProperties(&prop, 0);
+            cudaGetDeviceProperties(
+                &prop,
+                0
+            );
 
         if (error != cudaSuccess) {
             throw std::runtime_error(
-                std::string("cudaGetDeviceProperties failed: ") +
+                std::string(
+                    "cudaGetDeviceProperties failed: "
+                ) +
                 cudaGetErrorString(error)
             );
         }
@@ -202,65 +410,125 @@ int main() {
             << "\n\n";
 
         // ====================================================
-        // Данные
+        // Configuration
         // ====================================================
-
-        std::vector<float> input_data(
-            BATCH_SIZE * CONTEXT
-        );
-
-        std::vector<float> target_data(
-            BATCH_SIZE * CONTEXT
-        );
-
-        for (size_t b = 0; b < BATCH_SIZE; ++b) {
-            for (size_t i = 0; i < CONTEXT; ++i) {
-                size_t index =
-                    b * CONTEXT + i;
-
-                input_data[index] =
-                    static_cast<float>(
-                        (index * 17 + 13)
-                        % VOCAB_SIZE
-                    );
-
-                target_data[index] =
-                    static_cast<float>(
-                        (index * 31 + 7)
-                        % VOCAB_SIZE
-                    );
-            }
-        }
-
-        Tensor input_cpu(
-            {BATCH_SIZE, CONTEXT},
-            input_data
-        );
-
-        Tensor target_cpu(
-            {BATCH_SIZE, CONTEXT},
-            target_data
-        );
-
-        Tensor input(
-            {BATCH_SIZE, CONTEXT},
-            Device::CUDA
-        );
-
-        Tensor target(
-            {BATCH_SIZE, CONTEXT},
-            Device::CUDA
-        );
-
-        input_cpu.CopyToCUDA(input);
-        target_cpu.CopyToCUDA(target);
 
         std::cout
-            << "[OK] Input and target on CUDA.\n";
+            << "Model:\n"
+            << "  vocab      = " << VOCAB_SIZE << "\n"
+            << "  embed_dim  = " << EMBED_DIM << "\n"
+            << "  blocks     = " << BLOCKS << "\n"
+            << "  heads      = " << HEADS << "\n"
+            << "  hidden     = " << HIDDEN << "\n"
+            << "\n"
+            << "Training:\n"
+            << "  context    = " << CONTEXT << "\n"
+            << "  batch      = " << BATCH_SIZE << "\n"
+            << "  steps      = " << STEPS << "\n"
+            << "  lr         = " << LR << "\n"
+            << "  weight dec = " << WEIGHT_DECAY << "\n"
+            << "\n";
 
         // ====================================================
-        // Модель
+        // Corpus
         // ====================================================
+
+        std::cout
+            << "Loading corpus...\n";
+
+        std::string corpus =
+            LoadText(CORPUS_PATH);
+
+        std::cout
+            << "Corpus chars: "
+            << corpus.size()
+            << "\n\n";
+
+        // ====================================================
+        // Tokenizer
+        // ====================================================
+
+        std::cout
+            << "Loading tokenizer...\n";
+
+        BPETokenizer tokenizer;
+
+        tokenizer.Load(
+            TOKENIZER_PATH
+        );
+
+        if (tokenizer.GetVocabSize() != VOCAB_SIZE) {
+            throw std::runtime_error(
+                "Tokenizer vocabulary size does not match model VOCAB_SIZE"
+            );
+        }
+
+        std::cout
+            << "Tokenizer vocab: "
+            << tokenizer.GetVocabSize()
+            << "\n";
+
+        // ====================================================
+        // Encode
+        // ====================================================
+
+        std::cout
+            << "Encoding corpus...\n";
+
+        std::vector<size_t> tokens =
+            tokenizer.Encode(corpus);
+
+        std::cout
+            << "Tokens: "
+            << tokens.size()
+            << "\n\n";
+
+        if (tokens.size() <
+            CONTEXT + 100) {
+            throw std::runtime_error(
+                "Not enough tokens for training"
+            );
+        }
+
+        // ====================================================
+        // Train / validation split
+        // ====================================================
+
+        const size_t validation_tokens =
+            tokens.size() / 10;
+
+        const size_t train_end =
+            tokens.size() - validation_tokens;
+
+        const size_t validation_begin =
+            train_end;
+
+        std::cout
+            << "Dataset split:\n"
+            << "  train tokens = "
+            << train_end
+            << "\n"
+            << "  valid tokens = "
+            << validation_tokens
+            << "\n\n";
+
+        // ====================================================
+        // Random generator
+        // ====================================================
+
+        std::mt19937 generator(42);
+
+        // Отдельный генератор validation,
+        // чтобы validation не зависел
+        // от количества train steps.
+        std::mt19937 validation_generator(12345);
+
+        // ====================================================
+        // Model
+        // ====================================================
+
+        std::cout
+            << "Creating model...\n";
 
         LanguageModel model(
             VOCAB_SIZE,
@@ -274,162 +542,302 @@ int main() {
         std::cout
             << "[OK] Model created.\n\n";
 
+        CrossEntropyLoss loss;
+
         // ====================================================
-        // Состояние ДО обучения
+        // Training
         // ====================================================
 
-        auto embedding_before =
-            CopyToCPU(
-                model.GetEmbeddings()
+        std::filesystem::create_directories(
+            CHECKPOINT_DIR
+        );
+
+        std::ofstream log_file(
+            CHECKPOINT_DIR + "/training.log",
+            std::ios::app
+        );
+
+        if (!log_file) {
+            throw std::runtime_error(
+                "Cannot open training.log"
             );
+        }
 
-        // ====================================================
-        // Первый train step
-        // ====================================================
+        log_file
+            << "\n========================================\n"
+            << "NEW TRAINING RUN\n"
+            << "========================================\n";
+
+        log_file
+            << "Vocab: " << VOCAB_SIZE << "\n"
+            << "Embed: " << EMBED_DIM << "\n"
+            << "Blocks: " << BLOCKS << "\n"
+            << "Heads: " << HEADS << "\n"
+            << "Hidden: " << HIDDEN << "\n"
+            << "Context: " << CONTEXT << "\n"
+            << "Batch: " << BATCH_SIZE << "\n"
+            << "Steps: " << STEPS << "\n"
+            << "LR: " << LR << "\n"
+            << "WeightDecay: " << WEIGHT_DECAY << "\n";
+
+        double loss_sum = 0.0;
+
+        float best_validation_loss =
+            std::numeric_limits<float>::infinity();
+
+        auto training_start =
+            std::chrono::steady_clock::now();
+
+        auto last_log_time =
+            training_start;
 
         std::cout
             << "========================================\n"
-            << "             STEP 1\n"
+            << "             TRAINING\n"
             << "========================================\n\n";
 
-        float loss1 =
-            TrainStep(
-                model,
+        for (size_t step = 1;
+             step <= STEPS;
+             ++step) {
+
+            Tensor input(
+                {BATCH_SIZE, CONTEXT},
+                Device::CUDA
+            );
+
+            Tensor target(
+                {BATCH_SIZE, CONTEXT},
+                Device::CUDA
+            );
+
+            CreateBatch(
+                tokens,
+                0,
+                train_end,
+                generator,
                 input,
                 target
             );
 
-        auto embedding_after_step1 =
-            CopyToCPU(
-                model.GetEmbeddings()
-            );
+            float current_loss =
+                TrainStep(
+                    model,
+                    loss,
+                    input,
+                    target
+                );
 
-        float change1 =
-            DifferenceNorm(
-                embedding_before,
-                embedding_after_step1
-            );
+            loss_sum += current_loss;
 
-        std::cout
-            << "Loss: "
-            << loss1
-            << "\n";
+            // =================================================
+            // Logging
+            // =================================================
 
-        std::cout
-            << "Embedding change: "
-            << change1
-            << "\n\n";
+            if (step % LOG_EVERY == 0 ||
+                step == 1) {
 
-        if (change1 == 0.0f) {
-            throw std::runtime_error(
-                "AdamW step 1 did not change embedding weights"
-            );
+                const double avg_loss =
+                    loss_sum /
+                    static_cast<double>(
+                        step % LOG_EVERY == 0
+                            ? LOG_EVERY
+                            : step
+                    );
+
+                loss_sum = 0.0;
+
+                auto now =
+                    std::chrono::steady_clock::now();
+
+                double elapsed =
+                    std::chrono::duration<double>(
+                        now - last_log_time
+                    ).count();
+
+                double steps_per_second =
+                    LOG_EVERY / elapsed;
+
+                last_log_time = now;
+
+                std::cout
+                    << "Step "
+                    << std::setw(6)
+                    << step
+                    << " | Loss: "
+                    << std::fixed
+                    << std::setprecision(5)
+                    << current_loss
+                    << " | Avg: "
+                    << avg_loss
+                    << " | "
+                    << std::setprecision(2)
+                    << steps_per_second
+                    << " step/s\n";
+
+                log_file
+                    << "Step "
+                    << step
+                    << " | Loss: "
+                    << std::fixed
+                    << std::setprecision(6)
+                    << current_loss
+                    << " | Avg: "
+                    << avg_loss
+                    << " | "
+                    << steps_per_second
+                    << " step/s\n";
+
+                log_file.flush();
+            }
+
+            // =================================================
+            // Validation
+            // =================================================
+
+            if (step % VALIDATE_EVERY == 0) {
+                float validation_loss =
+                    Validate(
+                        model,
+                        loss,
+                        tokens,
+                        validation_begin,
+                        tokens.size(),
+                        validation_generator
+                    );
+
+                std::cout
+                    << "           Validation loss: "
+                    << std::fixed
+                    << std::setprecision(5)
+                    << validation_loss
+                    << "\n";
+
+                log_file
+                    << "Validation "
+                    << step
+                    << " | Loss: "
+                    << std::fixed
+                    << std::setprecision(6)
+                    << validation_loss
+                    << "\n";
+
+                log_file.flush();
+
+                if (validation_loss <
+                    best_validation_loss) {
+
+                    best_validation_loss =
+                        validation_loss;
+
+                    const std::string best_path =
+                        CHECKPOINT_DIR +
+                        "/best";
+
+                    std::cout
+                        << "           New best validation loss.\n"
+                        << "           Saving: "
+                        << best_path
+                        << "\n";
+
+                    cudaDeviceSynchronize();
+
+                    model.SaveModel(
+                        best_path
+                    );
+
+                    cudaDeviceSynchronize();
+                }
+            }
+
+            // =================================================
+            // Checkpoint
+            // =================================================
+
+            if (step % CHECKPOINT_EVERY == 0) {
+                const std::string checkpoint =
+                    CHECKPOINT_DIR +
+                    "/step_" +
+                    std::to_string(step);
+
+                std::cout
+                    << "           Saving checkpoint: "
+                    << checkpoint
+                    << "\n";
+
+                cudaDeviceSynchronize();
+
+                model.SaveModel(
+                    checkpoint
+                );
+
+                cudaDeviceSynchronize();
+
+                std::cout
+                    << "           [OK] Checkpoint saved.\n";
+            }
         }
 
+        // ====================================================
+        // Final checkpoint
+        // ====================================================
+
         std::cout
-            << "[OK] AdamW changed embedding weights.\n";
+            << "\nSaving final model...\n";
+
+        cudaDeviceSynchronize();
+
+        model.SaveModel(
+            CHECKPOINT_DIR + "/final"
+        );
+
+        cudaDeviceSynchronize();
+
+        auto training_end =
+            std::chrono::steady_clock::now();
+
+        double total_seconds =
+            std::chrono::duration<double>(
+                training_end - training_start
+            ).count();
 
         // ====================================================
-        // Второй train step
+        // Result
         // ====================================================
 
         std::cout
             << "\n========================================\n"
-            << "             STEP 2\n"
+            << "          TRAINING FINISHED\n"
             << "========================================\n\n";
 
-        float loss2 =
-            TrainStep(
-                model,
-                input,
-                target
-            );
-
-        auto embedding_after_step2 =
-            CopyToCPU(
-                model.GetEmbeddings()
-            );
-
-        float change2 =
-            DifferenceNorm(
-                embedding_after_step1,
-                embedding_after_step2
-            );
-
-        float total_change =
-            DifferenceNorm(
-                embedding_before,
-                embedding_after_step2
-            );
-
-        float step_difference =
-            MaxDifference(
-                embedding_after_step1,
-                embedding_after_step2
-            );
-
         std::cout
-            << "Loss: "
-            << loss2
+            << "Steps: "
+            << STEPS
             << "\n";
 
         std::cout
-            << "Embedding change: "
-            << change2
+            << "Time: "
+            << std::fixed
+            << std::setprecision(2)
+            << total_seconds
+            << " s\n";
+
+        std::cout
+            << "Average: "
+            << STEPS / total_seconds
+            << " step/s\n";
+
+        std::cout
+            << "Best validation loss: "
+            << best_validation_loss
             << "\n";
 
         std::cout
-            << "Total embedding change: "
-            << total_change
+            << "\nModel saved to:\n"
+            << CHECKPOINT_DIR
             << "\n";
 
         std::cout
-            << "Max parameter difference: "
-            << step_difference
-            << "\n\n";
-
-        if (change2 == 0.0f) {
-            throw std::runtime_error(
-                "AdamW step 2 did not change embedding weights"
-            );
-        }
-
-        std::cout
-            << "[OK] AdamW changed embedding again.\n";
-
-        // ====================================================
-        // Проверка loss
-        // ====================================================
-
-        std::cout
-            << "\n========================================\n"
-            << "             RESULT\n"
-            << "========================================\n\n";
-
-        std::cout
-            << "Loss step 1: "
-            << loss1
-            << "\n";
-
-        std::cout
-            << "Loss step 2: "
-            << loss2
-            << "\n";
-
-        if (!std::isfinite(loss1) ||
-            !std::isfinite(loss2)) {
-            throw std::runtime_error(
-                "Loss became NaN or Inf"
-            );
-        }
-
-        std::cout
-            << "[OK] Loss values are finite.\n";
-
-        std::cout
-            << "\n========================================\n"
-            << "       [OK] ADAMW INTEGRATION PASSED\n"
-            << "========================================\n";
+            << "\n[OK] TRAINING COMPLETED\n";
 
         return 0;
     }
