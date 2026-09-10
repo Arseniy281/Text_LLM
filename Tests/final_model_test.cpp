@@ -1,95 +1,124 @@
-#include "../Engine/Layers/language_model.h"
-#include "../Engine/Layers/ce_loss.h"
-#include "../Engine/Tokenizer/bpe_tokenizer.h"
 #include "../Engine/Tensor/tensor.h"
-#include "../Engine/Tensor/device.h"
+#include "../Engine/Tensor/backend.h"
 
 #include <cuda_runtime.h>
 
+#include <cmath>
 #include <iostream>
 #include <vector>
-#include <cmath>
-#include <fstream>
-#include <random>
-#include <iomanip>
 #include <stdexcept>
 
 // ============================================================
-// Настройки
+// Настройки AdamW
 // ============================================================
-
-const size_t VOCAB_SIZE = 1000;
-
-const size_t EMBED_DIM = 128;
-const size_t BLOCKS = 4;
-const size_t HEADS = 4;
-const size_t HIDDEN = 512;
-
-const size_t CONTEXT = 128;
-
-const size_t BATCH_SIZE = 8;
-const size_t STEPS = 5000;
 
 const float LR = 0.001f;
-
-const std::string DATA_PATH =
-    "../Data/master_and_margarita.txt";
+const float BETA1 = 0.9f;
+const float BETA2 = 0.999f;
+const float EPS = 1e-8f;
+const float WEIGHT_DECAY = 0.01f;
 
 // ============================================================
-// CUDA scalar -> CPU
+// Проверка
 // ============================================================
 
-float GetScalar(const Tensor& tensor) {
+bool AlmostEqual(float a, float b, float eps = 1e-6f) {
+    return std::fabs(a - b) <= eps;
+}
 
-    if (tensor.GetSize() != 1) {
-        throw std::runtime_error(
-            "GetScalar: tensor must contain exactly one value"
-        );
+void CheckVector(
+    const std::string& name,
+    const std::vector<float>& actual,
+    const std::vector<float>& expected,
+    float eps = 1e-6f
+) {
+    if (actual.size() != expected.size()) {
+        throw std::runtime_error(name + ": size mismatch");
     }
 
-    if (tensor.GetDevice() == Device::CPU) {
-        return tensor.at(0);
+    bool ok = true;
+
+    for (size_t i = 0; i < actual.size(); ++i) {
+        if (!AlmostEqual(actual[i], expected[i], eps)) {
+            ok = false;
+
+            std::cout
+                << name << "[" << i << "] mismatch: "
+                << "actual=" << actual[i]
+                << ", expected=" << expected[i]
+                << std::endl;
+        }
     }
 
-    float value = 0.0f;
-
-    cudaError_t error = cudaMemcpy(
-        &value,
-        tensor.Data(),
-        sizeof(float),
-        cudaMemcpyDeviceToHost
-    );
-
-    if (error != cudaSuccess) {
-        throw std::runtime_error(
-            std::string("GetScalar cudaMemcpy failed: ") +
-            cudaGetErrorString(error)
-        );
+    if (!ok) {
+        throw std::runtime_error(name + ": test failed");
     }
 
-    return value;
+    std::cout << "[OK] " << name << std::endl;
 }
 
 // ============================================================
-// Main
+// CPU расчёт AdamW
+// ============================================================
+
+void AdamWCPU(
+    std::vector<float>& parameter,
+    std::vector<float>& m,
+    std::vector<float>& v,
+    const std::vector<float>& gradient,
+    size_t step
+) {
+    float bias_correction1 =
+        1.0f - std::pow(BETA1, static_cast<float>(step));
+
+    float bias_correction2 =
+        1.0f - std::pow(BETA2, static_cast<float>(step));
+
+    for (size_t i = 0; i < parameter.size(); ++i) {
+        float g = gradient[i];
+
+        m[i] =
+            BETA1 * m[i]
+            + (1.0f - BETA1) * g;
+
+        v[i] =
+            BETA2 * v[i]
+            + (1.0f - BETA2) * g * g;
+
+        float m_hat =
+            m[i] / bias_correction1;
+
+        float v_hat =
+            v[i] / bias_correction2;
+
+        parameter[i] -= LR * (
+            m_hat / (std::sqrt(v_hat) + EPS)
+            + WEIGHT_DECAY * parameter[i]
+        );
+    }
+}
+
+// ============================================================
+// main
 // ============================================================
 
 int main() {
-
     try {
-
-        std::cout
-            << "========================================\n"
-            << "     RANDOM WINDOW CUDA MODEL TEST\n"
-            << "========================================\n\n";
-
-        // ----------------------------------------------------
-        // CUDA
-        // ----------------------------------------------------
+        std::cout << "========================================\n";
+        std::cout << "        CUDA ADAMW TEST\n";
+        std::cout << "========================================\n\n";
 
         int device_count = 0;
 
-        cudaGetDeviceCount(&device_count);
+        cudaError_t error =
+            cudaGetDeviceCount(&device_count);
+
+        if (error != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("cudaGetDeviceCount failed: ")
+                + cudaGetErrorString(error)
+            );
+        }
 
         std::cout
             << "CUDA devices: "
@@ -102,389 +131,306 @@ int main() {
             );
         }
 
-        cudaDeviceProp properties{};
-
-        cudaGetDeviceProperties(
-            &properties,
-            0
-        );
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, 0);
 
         std::cout
             << "GPU: "
-            << properties.name
+            << prop.name
             << "\n\n";
 
-        // ----------------------------------------------------
-        // Load book
-        // ----------------------------------------------------
+        // ====================================================
+        // Исходные данные
+        // ====================================================
 
-        std::cout
-            << "========================================\n"
-            << "          LOADING TEXT\n"
-            << "========================================\n";
+        std::vector<float> initial_parameter = {
+            1.0f,
+            -2.0f,
+            0.5f
+        };
 
-        std::ifstream file(DATA_PATH);
+        std::vector<float> gradient = {
+            0.1f,
+            -0.2f,
+            0.05f
+        };
 
-        if (!file) {
-            throw std::runtime_error(
-                "Cannot open: " + DATA_PATH
-            );
-        }
+        std::vector<float> initial_m = {
+            0.0f,
+            0.0f,
+            0.0f
+        };
 
-        std::string text(
-            (std::istreambuf_iterator<char>(file)),
-            std::istreambuf_iterator<char>()
+        std::vector<float> initial_v = {
+            0.0f,
+            0.0f,
+            0.0f
+        };
+
+        // ====================================================
+        // CPU expected
+        // ====================================================
+
+        std::vector<float> expected_parameter =
+            initial_parameter;
+
+        std::vector<float> expected_m =
+            initial_m;
+
+        std::vector<float> expected_v =
+            initial_v;
+
+        // Первый шаг
+        AdamWCPU(
+            expected_parameter,
+            expected_m,
+            expected_v,
+            gradient,
+            1
         );
 
-        std::cout
-            << "Text size: "
-            << text.size()
-            << " characters\n\n";
+        std::cout << "Expected after step 1:\n";
 
-        // ----------------------------------------------------
-        // Tokenizer
-        // ----------------------------------------------------
-
-        std::cout
-            << "========================================\n"
-            << "           TOKENIZATION\n"
-            << "========================================\n";
-
-        BPETokenizer tokenizer;
-
-        tokenizer.Train(
-            text,
-            VOCAB_SIZE
-        );
-
-        std::vector<size_t> tokens =
-            tokenizer.Encode(text);
-
-        std::cout
-            << "Tokens: "
-            << tokens.size()
-            << "\n";
-
-        if (tokens.size() <= CONTEXT) {
-            throw std::runtime_error(
-                "Not enough tokens for training"
-            );
+        for (size_t i = 0; i < expected_parameter.size(); ++i) {
+            std::cout
+                << "  parameter[" << i << "] = "
+                << expected_parameter[i]
+                << "\n";
         }
 
-        size_t max_start =
-            tokens.size() - CONTEXT - 1;
+        // ====================================================
+        // CUDA tensors
+        // ====================================================
 
-        std::cout
-            << "Possible windows: "
-            << max_start + 1
-            << "\n\n";
-
-        // ----------------------------------------------------
-        // Model
-        // ----------------------------------------------------
-
-        std::cout
-            << "========================================\n"
-            << "             MODEL\n"
-            << "========================================\n";
-
-        LanguageModel model(
-            VOCAB_SIZE,
-            EMBED_DIM,
-            BLOCKS,
-            HEADS,
-            HIDDEN,
+        Tensor parameter(
+            {3},
             Device::CUDA
         );
 
-        // KV cache во время обучения не нужен.
-        model.SetUseKVCache(false);
-
-        CrossEntropyLoss loss;
-
-        std::cout
-            << "Vocabulary: "
-            << VOCAB_SIZE
-            << "\n";
-
-        std::cout
-            << "Embedding: "
-            << EMBED_DIM
-            << "\n";
-
-        std::cout
-            << "Blocks: "
-            << BLOCKS
-            << "\n";
-
-        std::cout
-            << "Heads: "
-            << HEADS
-            << "\n";
-
-        std::cout
-            << "Hidden: "
-            << HIDDEN
-            << "\n";
-
-        std::cout
-            << "Context: "
-            << CONTEXT
-            << "\n";
-
-        std::cout
-            << "Steps: "
-            << STEPS
-            << "\n";
-
-        std::cout
-            << "Learning rate: "
-            << LR
-            << "\n\n";
-
-        // ----------------------------------------------------
-        // Random generator
-        // ----------------------------------------------------
-
-        std::mt19937 generator(42);
-
-        std::uniform_int_distribution<size_t> distribution(
-            0,
-            max_start
+        Tensor m(
+            {3},
+            0.0f,
+            Device::CUDA
         );
 
-        // ----------------------------------------------------
-        // Training
-        // ----------------------------------------------------
+        Tensor v(
+            {3},
+            0.0f,
+            Device::CUDA
+        );
 
-        std::cout
-            << "========================================\n"
-            << "             TRAINING\n"
-            << "========================================\n\n";
+        Tensor gradient_tensor(
+            {3},
+            Device::CUDA
+        );
 
-        float initial_loss = -1.0f;
-        float last_loss = -1.0f;
+        // CPU → CUDA
+        Tensor parameter_cpu(
+            {3},
+            std::move(initial_parameter)
+        );
 
-        double loss_sum = 0.0;
+        Tensor gradient_cpu(
+            {3},
+            std::move(gradient)
+        );
 
-        for (size_t step = 0;
-             step < STEPS;
-             ++step) {
+        parameter_cpu.CopyToCUDA(parameter);
+        gradient_cpu.CopyToCUDA(gradient_tensor);
 
-            // ------------------------------------------------
-            // Выбираем случайное окно
-            // ------------------------------------------------
+        // ====================================================
+        // Получаем CUDA backend
+        // ====================================================
 
-            // ------------------------------------------------
-            // Выбираем BATCH_SIZE случайных окон
-            // ------------------------------------------------
+        Backend& backend =
+            GetBackend(Device::CUDA);
 
-            std::vector<float> input_data(
-                BATCH_SIZE * CONTEXT
-            );
+        // ====================================================
+        // STEP 1
+        // ====================================================
 
-            std::vector<float> target_data(
-                BATCH_SIZE * CONTEXT
-            );
+        std::cout << "\nRunning AdamW step 1...\n";
 
-            std::vector<size_t> starts(
-                BATCH_SIZE
-            );
+        backend.AdamW(
+            parameter,
+            m,
+            v,
+            gradient_tensor,
+            LR,
+            BETA1,
+            BETA2,
+            EPS,
+            WEIGHT_DECAY,
+            1
+        );
 
-            for (size_t b = 0;
-                b < BATCH_SIZE;
-                ++b) {
+        cudaDeviceSynchronize();
 
-                starts[b] =
-                    distribution(generator);
+        // ====================================================
+        // Копируем результаты на CPU
+        // ====================================================
 
-                for (size_t i = 0;
-                    i < CONTEXT;
-                    ++i) {
+        Tensor parameter_result(
+            {3},
+            Device::CPU
+        );
 
-                    input_data[b * CONTEXT + i] =
-                        static_cast<float>(
-                            tokens[starts[b] + i]
-                        );
+        Tensor m_result(
+            {3},
+            Device::CPU
+        );
 
-                    target_data[b * CONTEXT + i] =
-                        static_cast<float>(
-                            tokens[starts[b] + i + 1]
-                        );
-                }
-            }
+        Tensor v_result(
+            {3},
+            Device::CPU
+        );
 
-            // ------------------------------------------------
-            // CPU tensors
-            // ------------------------------------------------
+        parameter.CopyToCPU(parameter_result);
+        m.CopyToCPU(m_result);
+        v.CopyToCPU(v_result);
 
-            Tensor input_cpu(
-                {BATCH_SIZE, CONTEXT},
-                std::move(input_data)
-            );
+        std::vector<float> actual_parameter(3);
+        std::vector<float> actual_m(3);
+        std::vector<float> actual_v(3);
 
-            Tensor target_cpu(
-                {BATCH_SIZE, CONTEXT},
-                std::move(target_data)
-            );
+        for (size_t i = 0; i < 3; ++i) {
+            actual_parameter[i] =
+                parameter_result.Data()[i];
 
-            // ------------------------------------------------
-            // CUDA tensors
-            // ------------------------------------------------
+            actual_m[i] =
+                m_result.Data()[i];
 
-            Tensor input(
-                {BATCH_SIZE, CONTEXT},
-                Device::CUDA
-            );
-
-            Tensor target(
-                {BATCH_SIZE, CONTEXT},
-                Device::CUDA
-            );
-
-            input_cpu.CopyToCUDA(input);
-            target_cpu.CopyToCUDA(target);
-
-            // ------------------------------------------------
-            // Forward
-            // ------------------------------------------------
-
-            model.ClearGrad();
-
-            auto input_ptr =
-                std::make_shared<Tensor>(
-                    std::move(input)
-                );
-
-            auto logits =
-                model.forward(input_ptr);
-
-            Tensor current_loss =
-                loss.forward(
-                    *logits,
-                    target
-                );
-
-            float loss_value =
-                GetScalar(current_loss);
-
-            // ------------------------------------------------
-            // Backward
-            // ------------------------------------------------
-
-            Tensor loss_grad =
-                loss.backward();
-
-            logits->backward(
-                loss_grad
-            );
-
-            // ------------------------------------------------
-            // Update
-            // ------------------------------------------------
-
-            model.Update(LR);
-
-            // ------------------------------------------------
-            // Statistics
-            // ------------------------------------------------
-
-            if (step == 0) {
-                initial_loss =
-                    loss_value;
-            }
-
-            last_loss =
-                loss_value;
-
-            loss_sum +=
-                loss_value;
-
-            // ------------------------------------------------
-            // Logging
-            // ------------------------------------------------
-
-            if (step % 100 == 0 ||
-                step == STEPS - 1) {
-
-                double average_loss =
-                    loss_sum /
-                    static_cast<double>(
-                        step + 1
-                    );
-
-                std::cout
-                    << "Step "
-                    << std::setw(4)
-                    << step
-                    << " | Loss: "
-                    << std::fixed
-                    << std::setprecision(6)
-                    << loss_value
-                    << " | Avg: "
-                    << average_loss
-                    << "\n";
-            }
+            actual_v[i] =
+                v_result.Data()[i];
         }
 
-        // ----------------------------------------------------
-        // Result
-        // ----------------------------------------------------
+        // ====================================================
+        // Expected m/v после первого шага
+        // ====================================================
 
-        std::cout
-            << "\n========================================\n"
-            << "               RESULT\n"
-            << "========================================\n";
+        std::vector<float> expected_m_step1 = {
+            0.01f,
+            -0.02f,
+            0.005f
+        };
 
-        std::cout
-            << "Initial loss: "
-            << initial_loss
-            << "\n";
+        std::vector<float> expected_v_step1 = {
+            0.00001f,
+            0.00004f,
+            0.0000025f
+        };
 
-        std::cout
-            << "Final loss:   "
-            << last_loss
-            << "\n";
+        // ====================================================
+        // Проверяем
+        // ====================================================
 
-        std::cout
-            << "Loss change:  "
-            << last_loss - initial_loss
-            << "\n";
+        CheckVector(
+            "Parameter step 1",
+            actual_parameter,
+            expected_parameter,
+            1e-5f
+        );
 
-        if (!std::isfinite(initial_loss) ||
-            !std::isfinite(last_loss)) {
+        CheckVector(
+            "m step 1",
+            actual_m,
+            expected_m_step1,
+            1e-7f
+        );
 
-            std::cout
-                << "\n[FAIL] Loss contains NaN or Inf\n";
+        CheckVector(
+            "v step 1",
+            actual_v,
+            expected_v_step1,
+            1e-8f
+        );
 
-            return 1;
+        // ====================================================
+        // STEP 2
+        // ====================================================
+
+        std::cout << "\nRunning AdamW step 2...\n";
+
+        // CPU expected продолжает состояние
+        AdamWCPU(
+            expected_parameter,
+            expected_m,
+            expected_v,
+            {
+                0.1f,
+                -0.2f,
+                0.05f
+            },
+            2
+        );
+
+        backend.AdamW(
+            parameter,
+            m,
+            v,
+            gradient_tensor,
+            LR,
+            BETA1,
+            BETA2,
+            EPS,
+            WEIGHT_DECAY,
+            2
+        );
+
+        cudaDeviceSynchronize();
+
+        parameter.CopyToCPU(parameter_result);
+        m.CopyToCPU(m_result);
+        v.CopyToCPU(v_result);
+
+        for (size_t i = 0; i < 3; ++i) {
+            actual_parameter[i] =
+                parameter_result.Data()[i];
+
+            actual_m[i] =
+                m_result.Data()[i];
+
+            actual_v[i] =
+                v_result.Data()[i];
         }
 
-        if (last_loss >= initial_loss) {
+        // ====================================================
+        // Проверяем второй шаг
+        // ====================================================
 
-            std::cout
-                << "\n[WARNING] Loss did not decrease.\n";
+        CheckVector(
+            "Parameter step 2",
+            actual_parameter,
+            expected_parameter,
+            1e-5f
+        );
 
-        } else {
+        CheckVector(
+            "m step 2",
+            actual_m,
+            expected_m,
+            1e-7f
+        );
 
-            std::cout
-                << "\n[OK] Loss decreased.\n";
-        }
+        CheckVector(
+            "v step 2",
+            actual_v,
+            expected_v,
+            1e-8f
+        );
 
-        std::cout
-            << "\n========================================\n"
-            << " RANDOM WINDOW TRAINING FINISHED\n"
-            << "========================================\n";
+        // ====================================================
+        // Финал
+        // ====================================================
+
+        std::cout << "\n========================================\n";
+        std::cout << "       [OK] ADAMW TEST PASSED\n";
+        std::cout << "========================================\n";
 
         return 0;
     }
-    catch (const std::exception& exception) {
-
-        std::cerr
-            << "\n[ERROR] "
-            << exception.what()
-            << "\n";
-
+    catch (const std::exception& e) {
+        std::cerr << "\n[FAILED] " << e.what() << "\n";
         return 1;
     }
 }
