@@ -542,8 +542,8 @@ int main() {
         // Tokenizer
         // ====================================================
 
-        BPETokenizer tokenizer =
-            PrepareTokenizer(corpus);
+        BPETokenizer tokenizer;
+        PrepareTokenizer(tokenizer, corpus);
 
         if (tokenizer.GetVocabSize() !=
             VOCAB_SIZE) {
