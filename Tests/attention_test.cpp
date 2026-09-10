@@ -28,7 +28,7 @@ const size_t HIDDEN = 512;
 const size_t CONTEXT = 128;
 
 const size_t BATCH_SIZE = 8;
-const size_t STEPS = 5000;
+const size_t STEPS = 20000;
 
 const float LR = 0.001f;
 
