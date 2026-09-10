@@ -1,7 +1,3 @@
-#include "../Engine/Layers/embedding_layer.h"
-#include "../Engine/Layers/linear_layer.h"
-#include "../Engine/Transformer/transformer.h"
-#include "../Engine/Tokenizer/bpe_tokenizer.h"
 #include "../Engine/Layers/language_model.h"
 #include "../Engine/Layers/ce_loss.h"
 
@@ -62,7 +58,7 @@ std::vector<float> CopyToCPU(const Tensor& tensor) {
 }
 
 // ============================================================
-// L2-норма разницы
+// L2 difference
 // ============================================================
 
 float DifferenceNorm(
@@ -86,7 +82,7 @@ float DifferenceNorm(
 }
 
 // ============================================================
-// Максимальная абсолютная разница
+// Max difference
 // ============================================================
 
 float MaxDifference(
@@ -112,91 +108,47 @@ float MaxDifference(
 }
 
 // ============================================================
-// Сравнение двух тензоров
+// Один train step
 // ============================================================
 
-void CompareTensors(
-    const std::string& name,
-    const Tensor& a,
-    const Tensor& b
+float TrainStep(
+    LanguageModel& model,
+    Tensor& input,
+    Tensor& target
 ) {
-    auto a_cpu = CopyToCPU(a);
-    auto b_cpu = CopyToCPU(b);
+    model.ClearGrad();
 
-    float diff_norm =
-        DifferenceNorm(a_cpu, b_cpu);
+    auto input_ptr =
+        std::make_shared<Tensor>(input);
 
-    float max_diff =
-        MaxDifference(a_cpu, b_cpu);
+    auto logits =
+        model.forward(input_ptr);
 
-    std::cout
-        << name << "\n"
-        << "  L2 difference: "
-        << diff_norm << "\n"
-        << "  Max difference: "
-        << max_diff << "\n\n";
-}
+    CrossEntropyLoss loss;
 
-// ============================================================
-// Сравнение изменения параметра
-// ============================================================
-
-void CompareUpdate(
-    const std::string& name,
-    const Tensor& before_old,
-    const Tensor& after_old,
-    const Tensor& before_adamw,
-    const Tensor& after_adamw
-) {
-    auto old_before = CopyToCPU(before_old);
-    auto old_after = CopyToCPU(after_old);
-
-    auto adamw_before = CopyToCPU(before_adamw);
-    auto adamw_after = CopyToCPU(after_adamw);
-
-    if (old_before.size() != adamw_before.size()) {
-        throw std::runtime_error(
-            name + ": size mismatch"
+    Tensor loss_value =
+        loss.forward(
+            *logits,
+            target
         );
-    }
 
-    float old_delta = 0.0f;
-    float adamw_delta = 0.0f;
-    float max_delta_difference = 0.0f;
+    Tensor loss_grad =
+        loss.backward();
 
-    for (size_t i = 0; i < old_before.size(); ++i) {
-        float old_change =
-            old_after[i] - old_before[i];
+    logits->backward(
+        loss_grad
+    );
 
-        float adamw_change =
-            adamw_after[i] - adamw_before[i];
+    cudaDeviceSynchronize();
 
-        old_delta +=
-            old_change * old_change;
+    auto loss_cpu =
+        CopyToCPU(loss_value);
 
-        adamw_delta +=
-            adamw_change * adamw_change;
+    model.UpdateAdamW(LR);
 
-        max_delta_difference =
-            std::max(
-                max_delta_difference,
-                std::fabs(
-                    old_change - adamw_change
-                )
-            );
-    }
+    cudaDeviceSynchronize();
 
-    old_delta = std::sqrt(old_delta);
-    adamw_delta = std::sqrt(adamw_delta);
-
-    std::cout
-        << name << "\n"
-        << "  Old Update delta: "
-        << old_delta << "\n"
-        << "  AdamW delta:      "
-        << adamw_delta << "\n"
-        << "  Max delta diff:   "
-        << max_delta_difference << "\n\n";
+    return loss_cpu[0];
 }
 
 // ============================================================
@@ -207,7 +159,7 @@ int main() {
     try {
         std::cout
             << "========================================\n"
-            << "       OLD UPDATE vs ADAMW TEST\n"
+            << "       ADAMW MODEL INTEGRATION TEST\n"
             << "========================================\n\n";
 
         // ====================================================
@@ -252,9 +204,6 @@ int main() {
         // ====================================================
         // Данные
         // ====================================================
-
-        std::cout
-            << "[1] Creating input data...\n";
 
         std::vector<float> input_data(
             BATCH_SIZE * CONTEXT
@@ -307,13 +256,13 @@ int main() {
         target_cpu.CopyToCUDA(target);
 
         std::cout
-            << "[2] Input and target copied to CUDA.\n";
+            << "[OK] Input and target on CUDA.\n";
 
         // ====================================================
-        // Создаём первую модель
+        // Модель
         // ====================================================
 
-        LanguageModel old_model(
+        LanguageModel model(
             VOCAB_SIZE,
             EMBED_DIM,
             BLOCKS,
@@ -323,346 +272,163 @@ int main() {
         );
 
         std::cout
-            << "[3] Old model created.\n";
+            << "[OK] Model created.\n\n";
 
         // ====================================================
-        // Сохраняем её
+        // Состояние ДО обучения
         // ====================================================
 
-        const std::string INITIAL_MODEL =
-            "/tmp/adamw_compare_initial";
-
-        old_model.SaveModel(
-            INITIAL_MODEL
-        );
-
-        std::cout
-            << "[4] Initial model saved.\n";
+        auto embedding_before =
+            CopyToCPU(
+                model.GetEmbeddings()
+            );
 
         // ====================================================
-        // Загружаем абсолютно такую же модель
-        // ====================================================
-
-        LanguageModel adamw_model(
-            VOCAB_SIZE,
-            EMBED_DIM,
-            BLOCKS,
-            HEADS,
-            HIDDEN,
-            Device::CUDA
-        );
-
-        adamw_model.LoadModel(
-            INITIAL_MODEL
-        );
-
-        std::cout
-            << "[5] AdamW model loaded.\n";
-
-        // ====================================================
-        // Проверяем, что модели действительно одинаковые
+        // Первый train step
         // ====================================================
 
         std::cout
-            << "\n========================================\n"
-            << "        INITIAL MODEL CHECK\n"
+            << "========================================\n"
+            << "             STEP 1\n"
             << "========================================\n\n";
 
-        CompareTensors(
-            "Embedding before training",
-            old_model.GetEmbeddings(),
-            adamw_model.GetEmbeddings()
-        );
-
-        // ====================================================
-        // Forward / backward OLD
-        // ====================================================
-
-        std::cout
-            << "[6] Running OLD forward/backward...\n";
-
-        old_model.ClearGrad();
-
-        auto input_ptr_old =
-            std::make_shared<Tensor>(input);
-
-        auto logits_old =
-            old_model.forward(input_ptr_old);
-
-        CrossEntropyLoss loss_old;
-
-        Tensor old_loss =
-            loss_old.forward(
-                *logits_old,
+        float loss1 =
+            TrainStep(
+                model,
+                input,
                 target
             );
 
-        Tensor old_loss_grad =
-            loss_old.backward();
-
-        logits_old->backward(
-            old_loss_grad
-        );
-
-        // ====================================================
-        // Forward / backward ADAMW
-        // ====================================================
-
-        std::cout
-            << "[7] Running AdamW forward/backward...\n";
-
-        adamw_model.ClearGrad();
-
-        auto input_ptr_adamw =
-            std::make_shared<Tensor>(input);
-
-        auto logits_adamw =
-            adamw_model.forward(
-                input_ptr_adamw
+        auto embedding_after_step1 =
+            CopyToCPU(
+                model.GetEmbeddings()
             );
 
-        CrossEntropyLoss loss_adamw;
-
-        Tensor adamw_loss =
-            loss_adamw.forward(
-                *logits_adamw,
-                target
+        float change1 =
+            DifferenceNorm(
+                embedding_before,
+                embedding_after_step1
             );
 
-        Tensor adamw_loss_grad =
-            loss_adamw.backward();
-
-        logits_adamw->backward(
-            adamw_loss_grad
-        );
-
-        cudaDeviceSynchronize();
-
-        // ====================================================
-        // Loss
-        // ====================================================
-
-        auto old_loss_cpu =
-            CopyToCPU(old_loss);
-
-        auto adamw_loss_cpu =
-            CopyToCPU(adamw_loss);
-
         std::cout
-            << "\n========================================\n"
-            << "              LOSS CHECK\n"
-            << "========================================\n\n";
-
-        std::cout
-            << "Old loss:   "
-            << old_loss_cpu[0]
+            << "Loss: "
+            << loss1
             << "\n";
 
         std::cout
-            << "AdamW loss: "
-            << adamw_loss_cpu[0]
-            << "\n";
-
-        float loss_difference =
-            std::fabs(
-                old_loss_cpu[0] -
-                adamw_loss_cpu[0]
-            );
-
-        std::cout
-            << "Difference:  "
-            << loss_difference
+            << "Embedding change: "
+            << change1
             << "\n\n";
 
-        if (loss_difference > 1e-4f) {
-            std::cout
-                << "[WARNING] Initial losses differ.\n";
-        } else {
-            std::cout
-                << "[OK] Initial losses match.\n";
+        if (change1 == 0.0f) {
+            throw std::runtime_error(
+                "AdamW step 1 did not change embedding weights"
+            );
         }
 
-        // ====================================================
-        // Сохраняем веса ДО update
-        // ====================================================
-
         std::cout
-            << "\n[8] Saving parameters before update...\n";
-
-        const std::string OLD_BEFORE =
-            "/tmp/old_before";
-
-        const std::string ADAMW_BEFORE =
-            "/tmp/adamw_before";
-
-        old_model.SaveModel(
-            OLD_BEFORE
-        );
-
-        adamw_model.SaveModel(
-            ADAMW_BEFORE
-        );
+            << "[OK] AdamW changed embedding weights.\n";
 
         // ====================================================
-        // UPDATE
+        // Второй train step
         // ====================================================
 
         std::cout
             << "\n========================================\n"
-            << "              OPTIMIZER STEP\n"
+            << "             STEP 2\n"
             << "========================================\n\n";
 
-        std::cout
-            << "Running OLD Update()...\n";
-
-        old_model.Update(
-            LR
-        );
-
-        cudaDeviceSynchronize();
-
-        std::cout
-            << "OLD Update finished.\n";
-
-        std::cout
-            << "\nRunning AdamW UpdateAdamW()...\n";
-
-        adamw_model.UpdateAdamW(
-            LR
-        );
-
-        cudaDeviceSynchronize();
-
-        std::cout
-            << "AdamW UpdateAdamW finished.\n";
-
-        // ====================================================
-        // Проверяем embedding
-        // ====================================================
-
-        std::cout
-            << "\n========================================\n"
-            << "           EMBEDDING UPDATE\n"
-            << "========================================\n\n";
-
-        LanguageModel old_before(
-            VOCAB_SIZE,
-            EMBED_DIM,
-            BLOCKS,
-            HEADS,
-            HIDDEN,
-            Device::CUDA
-        );
-
-        LanguageModel adamw_before(
-            VOCAB_SIZE,
-            EMBED_DIM,
-            BLOCKS,
-            HEADS,
-            HIDDEN,
-            Device::CUDA
-        );
-
-        old_before.LoadModel(
-            OLD_BEFORE
-        );
-
-        adamw_before.LoadModel(
-            ADAMW_BEFORE
-        );
-
-        CompareUpdate(
-            "Embedding",
-            old_before.GetEmbeddings(),
-            old_model.GetEmbeddings(),
-            adamw_before.GetEmbeddings(),
-            adamw_model.GetEmbeddings()
-        );
-
-        // ====================================================
-        // Финальная проверка
-        // ====================================================
-
-        auto old_initial_embedding =
-            CopyToCPU(
-                old_before.GetEmbeddings()
+        float loss2 =
+            TrainStep(
+                model,
+                input,
+                target
             );
 
-        auto old_final_embedding =
+        auto embedding_after_step2 =
             CopyToCPU(
-                old_model.GetEmbeddings()
+                model.GetEmbeddings()
             );
 
-        auto adamw_initial_embedding =
-            CopyToCPU(
-                adamw_before.GetEmbeddings()
-            );
-
-        auto adamw_final_embedding =
-            CopyToCPU(
-                adamw_model.GetEmbeddings()
-            );
-
-        float old_change =
+        float change2 =
             DifferenceNorm(
-                old_initial_embedding,
-                old_final_embedding
+                embedding_after_step1,
+                embedding_after_step2
             );
 
-        float adamw_change =
+        float total_change =
             DifferenceNorm(
-                adamw_initial_embedding,
-                adamw_final_embedding
+                embedding_before,
+                embedding_after_step2
+            );
+
+        float step_difference =
+            MaxDifference(
+                embedding_after_step1,
+                embedding_after_step2
             );
 
         std::cout
-            << "\n========================================\n"
-            << "              FINAL CHECK\n"
-            << "========================================\n\n";
-
-        std::cout
-            << "Old Update changed weights: ";
-
-        if (old_change > 0.0f) {
-            std::cout << "YES\n";
-        } else {
-            std::cout << "NO\n";
-        }
-
-        std::cout
-            << "AdamW changed weights:      ";
-
-        if (adamw_change > 0.0f) {
-            std::cout << "YES\n";
-        } else {
-            std::cout << "NO\n";
-        }
-
-        std::cout
-            << "\nOld embedding change:   "
-            << old_change
+            << "Loss: "
+            << loss2
             << "\n";
 
         std::cout
-            << "AdamW embedding change: "
-            << adamw_change
+            << "Embedding change: "
+            << change2
             << "\n";
 
-        if (old_change == 0.0f) {
-            throw std::runtime_error(
-                "OLD Update did not change embedding weights"
-            );
-        }
+        std::cout
+            << "Total embedding change: "
+            << total_change
+            << "\n";
 
-        if (adamw_change == 0.0f) {
+        std::cout
+            << "Max parameter difference: "
+            << step_difference
+            << "\n\n";
+
+        if (change2 == 0.0f) {
             throw std::runtime_error(
-                "AdamW did not change embedding weights"
+                "AdamW step 2 did not change embedding weights"
             );
         }
 
         std::cout
+            << "[OK] AdamW changed embedding again.\n";
+
+        // ====================================================
+        // Проверка loss
+        // ====================================================
+
+        std::cout
             << "\n========================================\n"
-            << "          [OK] TEST PASSED\n"
+            << "             RESULT\n"
+            << "========================================\n\n";
+
+        std::cout
+            << "Loss step 1: "
+            << loss1
+            << "\n";
+
+        std::cout
+            << "Loss step 2: "
+            << loss2
+            << "\n";
+
+        if (!std::isfinite(loss1) ||
+            !std::isfinite(loss2)) {
+            throw std::runtime_error(
+                "Loss became NaN or Inf"
+            );
+        }
+
+        std::cout
+            << "[OK] Loss values are finite.\n";
+
+        std::cout
+            << "\n========================================\n"
+            << "       [OK] ADAMW INTEGRATION PASSED\n"
             << "========================================\n";
 
         return 0;
@@ -670,7 +436,7 @@ int main() {
     catch (const std::exception& e) {
         std::cerr
             << "\n========================================\n"
-            << "             [FAILED]\n"
+            << "                FAILED\n"
             << "========================================\n\n"
             << e.what()
             << "\n";
