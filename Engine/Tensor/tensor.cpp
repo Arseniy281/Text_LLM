@@ -221,11 +221,8 @@ Tensor Tensor::Random(std::vector<size_t> shape, float min, float max, Device de
     return result;
 }
 
-Tensor::Tensor(
-    std::vector<size_t> shape,
-    std::vector<float> data
-)
-    : shape_(std::move(shape)) {
+Tensor::Tensor(std::vector<size_t> shape, std::vector<float> data, Device device)
+    : shape_(std::move(shape)), device_(device) {
 
     rank_ = shape_.size();
 
@@ -243,11 +240,32 @@ Tensor::Tensor(
         size_
     );
 
-    std::copy(
-        data.begin(),
-        data.begin() + copy_size,
-        data_
-    );
+    if (device_ == Device::CPU) {
+
+        std::copy(
+            data.begin(),
+            data.begin() + copy_size,
+            data_
+        );
+
+    } else {
+
+        cudaError_t error = cudaMemcpy(
+            data_,
+            data.data(),
+            copy_size * sizeof(float),
+            cudaMemcpyHostToDevice
+        );
+
+        if (error != cudaSuccess) {
+            throw std::runtime_error(
+                std::string(
+                    "Tensor CUDA construction failed: "
+                ) +
+                cudaGetErrorString(error)
+            );
+        }
+    }
 }
 
 Tensor::Tensor(std::vector<size_t> shape, float k, Device device)
@@ -653,43 +671,94 @@ void Tensor::SaveTensor(const std::string& path) const {
     std::ofstream file(path + ".bin", std::ios::binary);
 
     if (!file.is_open()) {
-        throw std::runtime_error("Cannot open file: " + path + ".bin");
+        throw std::runtime_error(
+            "Cannot open file: " + path + ".bin"
+        );
     }
-    
+
     for (size_t i = 0; i < shape_.size(); i++) {
         file << shape_[i];
-        if (i + 1 < shape_.size()) file << " ";
+
+        if (i + 1 < shape_.size()) {
+            file << " ";
+        }
     }
+
     file << "\n";
 
-    file << std::setprecision(10);
-    for (size_t i = 0; i < size_; i++) {
-        file << data_[i];
-        if (i + 1 < size_) file << " ";
+    if (device_ == Device::CPU) {
+
+        file << std::setprecision(10);
+
+        for (size_t i = 0; i < size_; i++) {
+            file << data_[i];
+
+            if (i + 1 < size_) {
+                file << " ";
+            }
+        }
+
+    } else {
+
+        std::vector<float> host_data(size_);
+
+        cudaError_t error = cudaMemcpy(
+            host_data.data(),
+            data_,
+            size_ * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+        if (error != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("Tensor::SaveTensor: CUDA copy failed: ") +
+                cudaGetErrorString(error)
+            );
+        }
+
+        file << std::setprecision(10);
+
+        for (size_t i = 0; i < size_; i++) {
+            file << host_data[i];
+
+            if (i + 1 < size_) {
+                file << " ";
+            }
+        }
     }
+
     file << "\n";
 }
 
-Tensor Tensor::LoadTensor(const std::string& path) {
+Tensor Tensor::LoadTensor(
+    const std::string& path,
+    Device device
+) {
     std::ifstream file(path + ".bin");
+
     if (!file.is_open()) {
-        throw std::runtime_error("Cannot open file: " + path + ".bin");
+        throw std::runtime_error(
+            "Cannot open file: " + path + ".bin"
+        );
     }
 
     std::vector<size_t> shape;
     size_t dim;
+
     while (file.peek() != '\n' && file >> dim) {
         shape.push_back(dim);
     }
+
     file.ignore();
 
     std::vector<float> data;
     float value;
+
     while (file >> value) {
         data.push_back(value);
     }
 
-    return Tensor(shape, data);
+    return Tensor(shape, data, device);
 }
 
 void Tensor::BuildBackwardGraph(std::vector<Tensor*>& graph, std::unordered_set<Tensor*>& visited) {
