@@ -880,11 +880,23 @@ int main() {
 
                     cudaDeviceSynchronize();
 
-                    model.SaveModel(
-                        best_path
-                    );
+                    std::cout << "           BEFORE SaveModel\n";
+                    std::cout.flush();
 
                     cudaDeviceSynchronize();
+
+                    std::cout << "           CUDA synchronized\n";
+                    std::cout.flush();
+
+                    model.SaveModel(best_path);
+
+                    std::cout << "           AFTER SaveModel\n";
+                    std::cout.flush();
+
+                    cudaDeviceSynchronize();
+
+                    std::cout << "           AFTER CUDA SYNC\n";
+                    std::cout.flush();
 
                     std::cout
                         << "           [OK] Best model saved.\n";
