@@ -113,10 +113,10 @@ int main() {
             );
         }
 
-        if (!std::filesystem::exists(TOKENIZER_PATH + ".bin")) {
+        if (!std::filesystem::exists(TOKENIZER_PATH)) {
             throw std::runtime_error(
                 "Tokenizer file not found: " +
-                TOKENIZER_PATH + ".bin"
+                TOKENIZER_PATH
             );
         }
 
