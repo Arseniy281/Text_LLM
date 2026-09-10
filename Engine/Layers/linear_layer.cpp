@@ -10,50 +10,91 @@
 #include <cmath>
 #include <memory>
 
+static std::shared_ptr<Tensor> CreateAdamState(const Tensor& parameter) {
+    return std::make_shared<Tensor>(
+        parameter.GetShape(),
+        0.0f,
+        parameter.GetDevice()
+    );
+}
+
 LinearLayer::LinearLayer(size_t in, size_t out, Device device)
         : input_size_(in), output_size_(out) {
 
-    float limit = std::sqrt( 6.0f / static_cast<float>(in + out));
+    float limit = std::sqrt(6.0f / static_cast<float>(in + out));
 
     if (device == Device::CPU) {
-        W_ = std::make_shared<Tensor>(
-            Tensor::Random({in, out}, -limit, limit)
-        );
-
+        W_ = std::make_shared<Tensor>(Tensor::Random({in, out}, -limit, limit));
         b_ = std::make_shared<Tensor>(Tensor({1, out}, 0.0f));
+    } else {
+        Tensor cpu_weights = Tensor::Random({in, out}, -limit, limit);
 
-        return;
-    }
+        W_ = std::make_shared<Tensor>(
+            std::vector<size_t>{in, out},
+            Device::CUDA
+        );
 
-    Tensor cpu_weights = Tensor::Random({in, out}, -limit, limit);
+        cudaError_t error = cudaMemcpy(
+            W_->Data(),
+            cpu_weights.Data(),
+            cpu_weights.GetSize() * sizeof(float),
+            cudaMemcpyHostToDevice
+        );
 
-    W_ = std::make_shared<Tensor>(
-        std::vector<size_t>{in, out},
-        Device::CUDA
-    );
+        if (error != cudaSuccess) {
+            throw std::runtime_error(
+                std::string(
+                    "LinearLayer: failed to copy "
+                    "weights to CUDA: "
+                ) + cudaGetErrorString(error)
+            );
+        }
 
-    cudaError_t error = cudaMemcpy(
-        W_->Data(),
-        cpu_weights.Data(),
-        cpu_weights.GetSize() * sizeof(float),
-        cudaMemcpyHostToDevice
-    );
-
-    if (error != cudaSuccess) {
-        throw std::runtime_error(
-            std::string(
-                "LinearLayer: failed to copy "
-                "weights to CUDA: "
-            ) +
-            cudaGetErrorString(error)
+        b_ = std::make_shared<Tensor>(
+            std::vector<size_t>{1, out},
+            0.0f,
+            Device::CUDA
         );
     }
 
-    b_ = std::make_shared<Tensor>(
-        std::vector<size_t>{1, out},
-        0.0f,
-        Device::CUDA
-    );
+    W_m_ = CreateAdamState(*W_);
+    W_v_ = CreateAdamState(*W_);
+
+    b_m_ = CreateAdamState(*b_);
+    b_v_ = CreateAdamState(*b_);
+}
+
+void LinearLayer::UpdateAdamW(float lr, float beta1, float beta2,
+        float eps, float weight_decay, size_t step) {
+    if (W_->Grad() != nullptr) {
+        GetBackend(W_->GetDevice()).AdamW(
+            *W_,
+            *W_m_,
+            *W_v_,
+            *W_->Grad(),
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step
+        );
+    }
+
+    if (b_->Grad() != nullptr) {
+        GetBackend(b_->GetDevice()).AdamW(
+            *b_,
+            *b_m_,
+            *b_v_,
+            *b_->Grad(),
+            lr,
+            beta1,
+            beta2,
+            eps,
+            0.0f,
+            step
+        );
+    }
 }
 
 void LinearLayer::ClearGrad() {
@@ -107,11 +148,21 @@ std::shared_ptr<Tensor> LinearLayer::forward(const std::shared_ptr<Tensor>& x) {
 void LinearLayer::Save(const std::string& folder, const std::string& name) const {
     W_->SaveTensor(folder + "/" + name + "_W");
     b_->SaveTensor(folder + "/" + name + "_b");
+
+    W_m_->SaveTensor(folder + "/" + name + "_W_m");
+    W_v_->SaveTensor(folder + "/" + name + "_W_v");
+
+    b_m_->SaveTensor(folder + "/" + name + "_b_m");
+    b_v_->SaveTensor(folder + "/" + name + "_b_v");
 }
 
 void LinearLayer::Load(const std::string& folder, const std::string& name) {
     *W_ = Tensor::LoadTensor(folder + "/" + name + "_W");
     *b_ = Tensor::LoadTensor(folder + "/" + name + "_b");
+    *W_m_ = Tensor::LoadTensor(folder + "/" + name + "_W_m");
+    *W_v_ = Tensor::LoadTensor(folder + "/" + name + "_W_v");
+    *b_m_ = Tensor::LoadTensor(folder + "/" + name + "_b_m");
+    *b_v_ = Tensor::LoadTensor(folder + "/" + name + "_b_v");
 }
 
 Tensor& LinearLayer::GetWeights() {

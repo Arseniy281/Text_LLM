@@ -17,6 +17,8 @@ private:
     std::mt19937 gen_;
 
     Device device_;
+    
+    size_t adam_step_ = 0;
 
 public:
     LanguageModel(size_t vocab_size, size_t embed_dim, size_t num_blocks,
@@ -24,6 +26,9 @@ public:
     std::shared_ptr<Tensor> forward(const std::shared_ptr<Tensor>& tokens);
     std::vector<size_t> generate(const std::vector<size_t>& prompt,
         int max_len, float temperature, float top_p, int end_token_id);
+
+    void UpdateAdamW(float lr, float beta1 = 0.9f, float beta2 = 0.999f,
+        float eps = 1e-8f, float weight_decay = 0.01f);
 
     int Sample(const Tensor& probs);
     int SampleGreedy(const Tensor& probs);

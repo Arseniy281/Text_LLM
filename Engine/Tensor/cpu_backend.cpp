@@ -1499,3 +1499,23 @@ Tensor CPUBackend::Reshape(const Tensor& input, const std::vector<size_t>& new_s
 
     return result;
 }
+
+void CPUBackend::AdamW(Tensor& parameter, Tensor& m, Tensor& v, const Tensor& gradient,
+    float lr, float beta1, float beta2, float eps, float weight_decay, size_t step) {
+
+    float bias_correction1 = 1.0f - std::pow(beta1, static_cast<float>(step));
+    float bias_correction2 = 1.0f - std::pow(beta2, static_cast<float>(step));
+
+    for (size_t i = 0; i < parameter.GetSize(); ++i) {
+        float g = gradient.at(i);
+
+        m.at(i) = beta1 * m.at(i) + (1.0f - beta1) * g;
+        v.at(i) = beta2 * v.at(i) + (1.0f - beta2) * g * g;
+        float m_hat = m.at(i) / bias_correction1;
+        float v_hat = v.at(i) / bias_correction2;
+
+        parameter.at(i) -= lr * (m_hat / (std::sqrt(v_hat) + eps) +
+            weight_decay * parameter.at(i)
+        );
+    }
+}

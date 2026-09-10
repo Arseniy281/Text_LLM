@@ -13,9 +13,16 @@ private:
 
     std::shared_ptr<Tensor> saved_mult_;
     std::shared_ptr<Tensor> saved_added_;
+
+    std::shared_ptr<Tensor> W_m_;
+    std::shared_ptr<Tensor> W_v_;
+    std::shared_ptr<Tensor> b_m_;
+    std::shared_ptr<Tensor> b_v_;
 public:
     LinearLayer(size_t in, size_t out, Device device = Device::CPU);
     LinearLayer() = default;
+
+    void UpdateAdamW(float lr, float beta1, float beta2, float eps, float weight_decay, size_t step);
 
     void ClearGrad();
     void Update(float lr);

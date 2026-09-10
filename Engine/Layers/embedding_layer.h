@@ -15,17 +15,16 @@ private:
     std::shared_ptr<Tensor> last_indices_;
     std::shared_ptr<Tensor> last_output_;
 
+    std::shared_ptr<Tensor> m_;
+    std::shared_ptr<Tensor> v_;
+
 public:
     EmbeddingLayer(size_t vocab_size, size_t embedding_dim, Device device = Device::CPU);
 
-    std::shared_ptr<Tensor> forward(
-        const std::shared_ptr<Tensor>& indices
-    );
+    void UpdateAdamW(float lr, float beta1, float beta2, float eps, float weight_decay, size_t step);
 
-    void backward(
-        const Tensor& indices,
-        const Tensor& grad_output
-    );
+    std::shared_ptr<Tensor> forward(const std::shared_ptr<Tensor>& indices);
+    void backward(const Tensor& indices, const Tensor& grad_output);
 
     void Update(float lr);
     void ClearGrad();

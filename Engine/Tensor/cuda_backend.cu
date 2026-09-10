@@ -2279,3 +2279,77 @@ Tensor CUDABackend::Reshape(const Tensor& input, const std::vector<size_t>& new_
 
     return result;
 }
+
+__global__ void AdamWKernel(float* parameter, float* m, float* v, const float* gradient,
+    size_t size, float lr, float beta1, float beta2, float eps, float weight_decay,
+    float bias_correction1, float bias_correction2) {
+
+    size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i >= size) { return; }
+    float g = gradient[i];
+
+    m[i] = beta1 * m[i] + (1.0f - beta1) * g;
+    v[i] = beta2 * v[i] + (1.0f - beta2) * g * g;
+
+    float m_hat = m[i] / bias_correction1;
+    float v_hat = v[i] / bias_correction2;
+
+    parameter[i] -= lr * (
+        m_hat / (sqrtf(v_hat) + eps) +
+        weight_decay * parameter[i]
+    );
+}
+
+void CUDABackend::AdamW(Tensor& parameter, Tensor& m, Tensor& v, const Tensor& gradient,
+    float lr, float beta1, float beta2, float eps, float weight_decay, size_t step) {
+        
+    if (parameter.GetDevice() != Device::CUDA ||
+        m.GetDevice() != Device::CUDA ||
+        v.GetDevice() != Device::CUDA ||
+        gradient.GetDevice() != Device::CUDA) {
+
+        throw std::runtime_error("CUDABackend::AdamW: all tensors must be on CUDA");
+    }
+
+    if (parameter.GetSize() != m.GetSize() ||
+        parameter.GetSize() != v.GetSize() ||
+        parameter.GetSize() != gradient.GetSize()) {
+
+        throw std::runtime_error("CUDABackend::AdamW: tensor sizes must match");
+    }
+
+    if (step == 0) {
+        throw std::runtime_error("CUDABackend::AdamW: step must be greater than 0");
+    }
+
+    float bias_correction1 = 1.0f - std::pow(beta1, static_cast<float>(step));
+    float bias_correction2 = 1.0f - std::pow(beta2, static_cast<float>(step));
+
+    const size_t threads = 256;
+    const size_t blocks = (parameter.GetSize() + threads - 1) / threads;
+
+    AdamWKernel<<<blocks, threads>>>(
+        parameter.Data(),
+        m.Data(),
+        v.Data(),
+        gradient.Data(),
+        parameter.GetSize(),
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        bias_correction1,
+        bias_correction2
+    );
+
+    cudaError_t error = cudaGetLastError();
+
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string("CUDABackend::AdamW: kernel launch failed: ") +
+            cudaGetErrorString(error)
+        );
+    }
+}

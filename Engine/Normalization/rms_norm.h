@@ -10,8 +10,13 @@ class RMSNorm {
 private:
     std::shared_ptr<Tensor> gamma_;
 
+    std::shared_ptr<Tensor> gamma_m_;
+    std::shared_ptr<Tensor> gamma_v_;
+
 public:
     RMSNorm(size_t embed_dim, Device device = Device::CPU);
+
+    void UpdateAdamW(float lr, float beta1, float beta2, float eps, float weight_decay, size_t step);
 
     std::shared_ptr<Tensor> forward(const std::shared_ptr<Tensor>& x);
 

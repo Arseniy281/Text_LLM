@@ -38,6 +38,14 @@ LanguageModel::LanguageModel(size_t vocab_size, size_t embed_dim, size_t num_blo
       gen_(std::random_device{}()) {}
 
 
+void LanguageModel::UpdateAdamW(float lr, float beta1, float beta2, float eps, float weight_decay) {
+    adam_step_++;
+    embedding_.UpdateAdamW(lr, beta1, beta2, eps, weight_decay, adam_step_);
+    transformer_.UpdateAdamW(lr, beta1, beta2, eps, weight_decay, adam_step_);
+    lm_head_.UpdateAdamW(lr, beta1, beta2, eps, weight_decay, adam_step_);
+}
+
+
 std::shared_ptr<Tensor> LanguageModel::forward(const std::shared_ptr<Tensor>& tokens) {
     ScopedTimer timer("LanguageModel::forward");
     auto x = embedding_.forward(tokens);
@@ -201,15 +209,59 @@ std::vector<size_t> LanguageModel::generate(const std::vector<size_t>& prompt,
 
 void LanguageModel::SaveModel(const std::string& folder) {
     std::filesystem::create_directories(folder);
+
     embedding_.Save(folder + "/embedding");
     transformer_.Save(folder);
     lm_head_.Save(folder, "lm_head");
+
+    std::ofstream file(folder + "/adam_step", std::ios::binary);
+
+    if (!file) {
+        throw std::runtime_error(
+            "LanguageModel::SaveModel: "
+            "failed to open adam_step"
+        );
+    }
+
+    file.write(
+        reinterpret_cast<const char*>(&adam_step_),
+        sizeof(adam_step_)
+    );
+
+    if (!file) {
+        throw std::runtime_error(
+            "LanguageModel::SaveModel: "
+            "failed to save adam_step"
+        );
+    }
 }
 
 void LanguageModel::LoadModel(const std::string& folder) {
     embedding_.Load(folder + "/embedding");
     transformer_.Load(folder);
     lm_head_.Load(folder, "lm_head");
+
+    std::ifstream file(folder + "/adam_step", std::ios::binary);
+
+    if (!file) {
+        throw std::runtime_error(
+            "LanguageModel::LoadModel: "
+            "failed to open adam_step"
+        );
+    }
+
+    file.read(
+        reinterpret_cast<char*>(&adam_step_),
+        sizeof(adam_step_)
+    );
+
+    if (!file) {
+        throw std::runtime_error(
+            "LanguageModel::LoadModel: "
+            "failed to load adam_step"
+        );
+    }
+
     transformer_.ResetCache();
 }
 

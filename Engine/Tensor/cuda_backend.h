@@ -72,4 +72,7 @@ public:
     Tensor Sigmoid(const Tensor& input) const override;
     Tensor SigmoidBackward(const Tensor& input, const Tensor& grad_output) const override;
     Tensor Reshape(const Tensor& input, const std::vector<size_t>& new_shape) const override;
+
+    void AdamW(Tensor& parameter, Tensor& m, Tensor& v, const Tensor& gradient, 
+        float lr, float beta1, float beta2, float eps, float weight_decay, size_t step) override;
 };

@@ -29,6 +29,51 @@ MultiHeadAttention::MultiHeadAttention(size_t embed_dim, size_t num_heads, Devic
     }
 }
 
+void MultiHeadAttention::UpdateAdamW(float lr, float beta1, float beta2,
+        float eps, float weight_decay, size_t step) {
+    for (auto& layer : q_layers_) {
+        layer.UpdateAdamW(
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step
+        );
+    }
+
+    for (auto& layer : k_layers_) {
+        layer.UpdateAdamW(
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step
+        );
+    }
+
+    for (auto& layer : v_layers_) {
+        layer.UpdateAdamW(
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step
+        );
+    }
+
+    output_layer_.UpdateAdamW(
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        step
+    );
+}
+
 Tensor MultiHeadAttention::CreateCausalMask(size_t query_len, size_t key_len, size_t query_start, Device device) {
     return GetBackend(device).CreateCausalMask(
         query_len,

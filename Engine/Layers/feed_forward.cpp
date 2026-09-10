@@ -10,6 +10,27 @@ FeedForward::FeedForward(size_t embed_dim, size_t hidden_dim, Device device)
     : fc1_(embed_dim, hidden_dim, device),
       fc2_(hidden_dim, embed_dim, device) {}
 
+void FeedForward::UpdateAdamW(float lr, float beta1, float beta2, 
+        float eps, float weight_decay, size_t step) {
+    fc1_.UpdateAdamW(
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        step
+    );
+
+    fc2_.UpdateAdamW(
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        step
+    );
+}
+
 std::shared_ptr<Tensor> FeedForward::forward(
         const std::shared_ptr<Tensor>& x) {
 

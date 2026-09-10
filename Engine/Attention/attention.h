@@ -44,6 +44,8 @@ private:
 public:
     MultiHeadAttention(size_t embed_dim, size_t num_heads = 1, Device device = Device::CPU);
 
+    void UpdateAdamW(float lr, float beta1, float beta2, float eps, float weight_decay, size_t step);
+
     Tensor CreateCausalMask(size_t query_len, size_t key_len, size_t query_start, Device device);
     std::shared_ptr<Tensor> forward(const std::shared_ptr<Tensor>& x);
 

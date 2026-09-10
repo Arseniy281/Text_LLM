@@ -12,7 +12,9 @@ private:
     LinearLayer fc2_;
 public:
     FeedForward(size_t embed_dim, size_t hidden_dim, Device device = Device::CPU);
-    // Tensor forward(const Tensor& x);
+
+    void UpdateAdamW(float lr, float beta1, float beta2, float eps, float weight_decay, size_t step);
+
     std::shared_ptr<Tensor> forward(const std::shared_ptr<Tensor>& x);
     void Update(float lr);
     void ClearGrad();

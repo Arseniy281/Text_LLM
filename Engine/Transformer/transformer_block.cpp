@@ -14,6 +14,45 @@ TransformerBlock::TransformerBlock(size_t embed_dim, size_t num_heads, size_t hi
       rms_norm_2_(embed_dim, device),
       feed_forward_(embed_dim, hidden_dim, device) {}
 
+void TransformerBlock::UpdateAdamW(float lr, float beta1, float beta2,
+        float eps, float weight_decay, size_t step) {
+    rms_norm_1_.UpdateAdamW(
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        step
+    );
+
+    attention_.UpdateAdamW(
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        step
+    );
+
+    rms_norm_2_.UpdateAdamW(
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        step
+    );
+
+    feed_forward_.UpdateAdamW(
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        step
+    );
+}
+
 std::shared_ptr<Tensor> TransformerBlock::forward(const std::shared_ptr<Tensor>& x) {
     auto start = std::chrono::steady_clock::now();
 

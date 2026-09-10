@@ -34,6 +34,20 @@ Transformer::Transformer(size_t n, size_t embed_dim, size_t num_heads, size_t hi
     }
 }
 
+void Transformer::UpdateAdamW(float lr, float beta1, float beta2, 
+        float eps, float weight_decay, size_t step) {
+    for (auto& block : blocks_) {
+        block.UpdateAdamW(
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step
+        );
+    }
+}
+
 std::shared_ptr<Tensor> Transformer::forward(const std::shared_ptr<Tensor>& x) {
     ScopedTimer timer("Transformer::forward");
 

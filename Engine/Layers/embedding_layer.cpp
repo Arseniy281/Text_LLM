@@ -9,21 +9,50 @@
 EmbeddingLayer::EmbeddingLayer(size_t vocab_size, size_t embedding_dim, Device device)
     : vocab_size_(vocab_size),
       embedding_dim_(embedding_dim),
-      embeddings_(
-          Tensor::Random(
+      embeddings_(Tensor::Random(
               {vocab_size, embedding_dim},
               -0.1f,
               0.1f,
               device
           )
-      ),
-      grad_(
+      ), grad_(
           std::make_shared<Tensor>(
               std::vector<size_t>{vocab_size, embedding_dim},
               0.0f,
               device
           )
-      ) {}
+      ), m_(std::make_shared<Tensor>(
+            std::vector<size_t>{vocab_size, embedding_dim},
+            0.0f,
+            device
+        )
+    ), v_(
+        std::make_shared<Tensor>(
+            std::vector<size_t>{vocab_size, embedding_dim},
+            0.0f,
+            device
+        )
+    ) {}
+
+void EmbeddingLayer::UpdateAdamW(float lr, float beta1, float beta2, 
+        float eps, float weight_decay, size_t step) {
+    if (grad_ == nullptr) {
+        return;
+    }
+
+    GetBackend(embeddings_.GetDevice()).AdamW(
+        embeddings_,
+        *m_,
+        *v_,
+        *grad_,
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        step
+    );
+}
 
 
 std::shared_ptr<Tensor> EmbeddingLayer::forward(const std::shared_ptr<Tensor>& indices) {
@@ -90,11 +119,15 @@ void EmbeddingLayer::Update(float lr) {
 
 void EmbeddingLayer::Save(const std::string& path) const {
     embeddings_.SaveTensor(path);
+    m_->SaveTensor(path + "_m");
+    v_->SaveTensor(path + "_v");
 }
 
 
 void EmbeddingLayer::Load(const std::string& path) {
     embeddings_ = Tensor::LoadTensor(path);
+    *m_ = Tensor::LoadTensor(path + "_m");
+    *v_ = Tensor::LoadTensor(path + "_v");
 
     if (embeddings_.GetShape().size() != 2 ||
         embeddings_.GetShape()[0] != vocab_size_ ||
@@ -106,9 +139,20 @@ void EmbeddingLayer::Load(const std::string& path) {
         );
     }
 
+    if (m_->GetShape() != embeddings_.GetShape() ||
+        v_->GetShape() != embeddings_.GetShape()) {
+
+        throw std::runtime_error(
+            "EmbeddingLayer::Load: "
+            "Adam states have invalid shape"
+        );
+    }
+
     grad_ = std::make_shared<Tensor>(
-        Tensor({vocab_size_, embedding_dim_},
-            0.0f, embeddings_.GetDevice()
+        Tensor(
+            {vocab_size_, embedding_dim_},
+            0.0f,
+            embeddings_.GetDevice()
         )
     );
 }
