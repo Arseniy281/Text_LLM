@@ -125,9 +125,11 @@ void EmbeddingLayer::Save(const std::string& path) const {
 
 
 void EmbeddingLayer::Load(const std::string& path) {
-    embeddings_ = Tensor::LoadTensor(path);
-    *m_ = Tensor::LoadTensor(path + "_m");
-    *v_ = Tensor::LoadTensor(path + "_v");
+    Device device = embeddings_.GetDevice();
+
+    embeddings_ = Tensor::LoadTensor(path, device);
+    *m_ = Tensor::LoadTensor(path + "_m", device);
+    *v_ = Tensor::LoadTensor(path + "_v", device);
 
     if (embeddings_.GetShape().size() != 2 ||
         embeddings_.GetShape()[0] != vocab_size_ ||
@@ -152,7 +154,7 @@ void EmbeddingLayer::Load(const std::string& path) {
         Tensor(
             {vocab_size_, embedding_dim_},
             0.0f,
-            embeddings_.GetDevice()
+            device
         )
     );
 }
