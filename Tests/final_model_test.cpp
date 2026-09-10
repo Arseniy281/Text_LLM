@@ -20,7 +20,7 @@ const std::string TOKENIZER_PATH =
     "/content/Text_LLM/Models/MargaritaTokenizer";
 
 const std::string MODEL_PATH =
-    "/content/Text_LLM/Models/MargaritaCUDA/best";
+    "/content/Text_LLM/Models/MargaritaCUDA/step_5000";
 
 
 void PrintText(
