@@ -35,6 +35,9 @@ const float LR = 0.001f;
 const std::string DATA_PATH =
     "../Data/master_and_margarita.txt";
 
+const std::string TOKENIZER_PATH =
+    "../Models/MargaritaCUDA/step_5000/MargaritaTokinizer";
+
 // ============================================================
 // CUDA scalar -> CPU
 // ============================================================
