@@ -134,41 +134,120 @@ std::vector<size_t> LanguageModel::generate(
         temperature = 1.0f;
     }
 
+    if (device_ != Device::CUDA) {
+        throw std::runtime_error(
+            "LanguageModel::generate: "
+            "CUDA generation currently requires CUDA device"
+        );
+    }
+
     transformer_.SetUseKVCache(true);
     transformer_.ResetCache();
 
     std::shared_ptr<Tensor> output;
 
-    for (size_t token : prompt) {
+    // ========================================================
+    // PROMPT
+    // ========================================================
 
+    for (size_t pos = 0; pos < prompt.size(); ++pos) {
+
+        size_t token = prompt[pos];
+
+        // Токен сначала создаём на CPU.
         auto input_cpu = std::make_shared<Tensor>(
             std::vector<size_t>{1, 1}
         );
 
-        input_cpu->at({0, 0}) = static_cast<float>(token);
+        input_cpu->at({0, 0}) =
+            static_cast<float>(token);
 
+        // Затем переносим его на CUDA.
         auto input = std::make_shared<Tensor>(
             std::vector<size_t>{1, 1},
             0.0f,
-            device_
+            Device::CUDA
         );
 
         input_cpu->CopyToCUDA(*input);
 
         output = forward(input);
+
+        // Временно синхронизируемся после каждого prompt token.
+        // Это позволяет точно определить место CUDA ошибки.
+        cudaError_t error = cudaDeviceSynchronize();
+
+        if (error != cudaSuccess) {
+            transformer_.SetUseKVCache(false);
+            transformer_.ResetCache();
+
+            throw std::runtime_error(
+                "LanguageModel::generate: "
+                "CUDA error after prompt token " +
+                std::to_string(pos) +
+                ": " +
+                cudaGetErrorString(error)
+            );
+        }
     }
+
+    // ========================================================
+    // GENERATION
+    // ========================================================
 
     std::vector<size_t> generated;
     generated.reserve(max_new_tokens);
 
-    for (int step = 0; step < max_new_tokens; step++) {
+    for (int step = 0; step < max_new_tokens; ++step) {
 
-        size_t last_position =
-            output->GetShape()[1] - 1;
+        if (!output) {
+            transformer_.SetUseKVCache(false);
+            transformer_.ResetCache();
 
-        // ----------------------------------------------------
-        // CUDA -> CPU: забираем logits последней позиции
-        // ----------------------------------------------------
+            throw std::runtime_error(
+                "LanguageModel::generate: "
+                "forward returned null output"
+            );
+        }
+
+        const std::vector<size_t>& shape =
+            output->GetShape();
+
+        if (shape.size() != 3) {
+            transformer_.SetUseKVCache(false);
+            transformer_.ResetCache();
+
+            throw std::runtime_error(
+                "LanguageModel::generate: "
+                "expected output rank 3"
+            );
+        }
+
+        if (shape[0] != 1) {
+            transformer_.SetUseKVCache(false);
+            transformer_.ResetCache();
+
+            throw std::runtime_error(
+                "LanguageModel::generate: "
+                "expected batch size 1"
+            );
+        }
+
+        if (shape[2] != vocab_size_) {
+            transformer_.SetUseKVCache(false);
+            transformer_.ResetCache();
+
+            throw std::runtime_error(
+                "LanguageModel::generate: "
+                "output vocabulary size does not match model"
+            );
+        }
+
+        size_t last_position = shape[1] - 1;
+
+        // ====================================================
+        // CUDA -> CPU
+        // ====================================================
 
         Tensor logits(
             {vocab_size_},
@@ -176,21 +255,34 @@ std::vector<size_t> LanguageModel::generate(
             Device::CPU
         );
 
-        cudaMemcpy(
+        const size_t offset =
+            last_position * vocab_size_;
+
+        cudaError_t error = cudaMemcpy(
             logits.Data(),
-            output->Data() +
-                last_position * vocab_size_,
+            output->Data() + offset,
             vocab_size_ * sizeof(float),
             cudaMemcpyDeviceToHost
         );
 
-        // ----------------------------------------------------
-        // Softmax на CPU
-        // ----------------------------------------------------
+        if (error != cudaSuccess) {
+            transformer_.SetUseKVCache(false);
+            transformer_.ResetCache();
+
+            throw std::runtime_error(
+                "LanguageModel::generate: "
+                "failed to copy logits CUDA -> CPU: " +
+                std::string(cudaGetErrorString(error))
+            );
+        }
+
+        // ====================================================
+        // SOFTMAX
+        // ====================================================
 
         float max_logit = logits.at(0);
 
-        for (size_t i = 1; i < vocab_size_; i++) {
+        for (size_t i = 1; i < vocab_size_; ++i) {
 
             float value = logits.at(i);
 
@@ -207,7 +299,7 @@ std::vector<size_t> LanguageModel::generate(
 
         float sum = 0.0f;
 
-        for (size_t i = 0; i < vocab_size_; i++) {
+        for (size_t i = 0; i < vocab_size_; ++i) {
 
             float value = std::exp(
                 (logits.at(i) - max_logit) /
@@ -218,28 +310,31 @@ std::vector<size_t> LanguageModel::generate(
             sum += value;
         }
 
-        if (sum <= 0.0f) {
+        if (!std::isfinite(sum) || sum <= 0.0f) {
+            transformer_.SetUseKVCache(false);
+            transformer_.ResetCache();
+
             throw std::runtime_error(
                 "LanguageModel::generate: "
-                "softmax sum is not positive"
+                "invalid softmax sum"
             );
         }
 
-        for (size_t i = 0; i < vocab_size_; i++) {
+        for (size_t i = 0; i < vocab_size_; ++i) {
             probs.at(i) /= sum;
         }
 
-        // ----------------------------------------------------
-        // Top-P на CPU
-        // ----------------------------------------------------
+        // ====================================================
+        // TOP-P
+        // ====================================================
 
         if (top_p > 0.0f && top_p < 1.0f) {
             TopP(probs, top_p);
         }
 
-        // ----------------------------------------------------
-        // Выбираем следующий токен
-        // ----------------------------------------------------
+        // ====================================================
+        // SAMPLING
+        // ====================================================
 
         size_t next_token =
             static_cast<size_t>(SampleGreedy(probs));
@@ -253,9 +348,9 @@ std::vector<size_t> LanguageModel::generate(
 
         generated.push_back(next_token);
 
-        // ----------------------------------------------------
-        // Следующий input снова отправляем на CUDA
-        // ----------------------------------------------------
+        // ====================================================
+        // NEXT TOKEN -> CUDA
+        // ====================================================
 
         auto next_input_cpu =
             std::make_shared<Tensor>(
@@ -269,13 +364,32 @@ std::vector<size_t> LanguageModel::generate(
             std::make_shared<Tensor>(
                 std::vector<size_t>{1, 1},
                 0.0f,
-                device_
+                Device::CUDA
             );
 
         next_input_cpu->CopyToCUDA(*next_input);
 
         output = forward(next_input);
+
+        error = cudaDeviceSynchronize();
+
+        if (error != cudaSuccess) {
+            transformer_.SetUseKVCache(false);
+            transformer_.ResetCache();
+
+            throw std::runtime_error(
+                "LanguageModel::generate: "
+                "CUDA error at generation step " +
+                std::to_string(step) +
+                ": " +
+                cudaGetErrorString(error)
+            );
+        }
     }
+
+    // ========================================================
+    // CLEANUP
+    // ========================================================
 
     transformer_.SetUseKVCache(false);
     transformer_.ResetCache();
