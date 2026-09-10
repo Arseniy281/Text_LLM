@@ -156,13 +156,41 @@ void LinearLayer::Save(const std::string& folder, const std::string& name) const
     b_v_->SaveTensor(folder + "/" + name + "_b_v");
 }
 
-void LinearLayer::Load(const std::string& folder, const std::string& name) {
-    *W_ = Tensor::LoadTensor(folder + "/" + name + "_W");
-    *b_ = Tensor::LoadTensor(folder + "/" + name + "_b");
-    *W_m_ = Tensor::LoadTensor(folder + "/" + name + "_W_m");
-    *W_v_ = Tensor::LoadTensor(folder + "/" + name + "_W_v");
-    *b_m_ = Tensor::LoadTensor(folder + "/" + name + "_b_m");
-    *b_v_ = Tensor::LoadTensor(folder + "/" + name + "_b_v");
+void LinearLayer::Load(
+    const std::string& folder,
+    const std::string& name
+) {
+    Device device = W_->GetDevice();
+
+    *W_ = Tensor::LoadTensor(
+        folder + "/" + name + "_W",
+        device
+    );
+
+    *b_ = Tensor::LoadTensor(
+        folder + "/" + name + "_b",
+        device
+    );
+
+    *W_m_ = Tensor::LoadTensor(
+        folder + "/" + name + "_W_m",
+        device
+    );
+
+    *W_v_ = Tensor::LoadTensor(
+        folder + "/" + name + "_W_v",
+        device
+    );
+
+    *b_m_ = Tensor::LoadTensor(
+        folder + "/" + name + "_b_m",
+        device
+    );
+
+    *b_v_ = Tensor::LoadTensor(
+        folder + "/" + name + "_b_v",
+        device
+    );
 }
 
 Tensor& LinearLayer::GetWeights() {
