@@ -477,6 +477,26 @@ int main() {
             << "========================================\n";
 
         return 0;
+
+        const std::string MODEL_PATH = "../Models/MargaritaCUDA/step_5000";
+
+        std::cout
+
+            << "\n========================================\n"
+
+            << "          SAVING MODEL\n"
+
+            << "========================================\n";
+
+        model.SaveModel(MODEL_PATH);
+
+        std::cout
+
+            << "[OK] Model saved to: "
+
+            << MODEL_PATH
+
+            << "\n";
     }
     catch (const std::exception& exception) {
 
