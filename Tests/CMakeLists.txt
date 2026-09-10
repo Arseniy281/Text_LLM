@@ -60,6 +60,7 @@ add_executable(attention_test
     ../../Engine/Tensor/backend.cpp
     ../../Engine/Tensor/cpu_backend.cpp
     ../../Engine/Tensor/matmul.cpp
+    ../../Engine/Tensor/cuda_backend.cu
 
     # Autograd
     ../../Engine/Autograd/add_op.cpp
@@ -69,22 +70,43 @@ add_executable(attention_test
     ../../Engine/Autograd/sum_op.cpp
     ../../Engine/Autograd/relu.cpp
     ../../Engine/Autograd/sigmoid.cpp
+    ../../Engine/Autograd/tanh_op.cpp
+    ../../Engine/Autograd/gelu.cpp
     ../../Engine/Autograd/mul_scalar_op.cpp
     ../../Engine/Autograd/concatenate_op.cpp
     ../../Engine/Autograd/transpose_op.cpp
     ../../Engine/Autograd/rope_op.cpp
     ../../Engine/Autograd/softmax_op.cpp
+    ../../Engine/Autograd/reshape_op.cpp
 
     # Attention
-    ../../Engine/Attention/rope.cpp
-    ../../Engine/Attention/softmax.cpp
     ../../Engine/Attention/attention.cpp
+    ../../Engine/Attention/softmax.cpp
+    ../../Engine/Attention/rope.cpp
 
     # Layers
     ../../Engine/Layers/linear_layer.cpp
+    ../../Engine/Layers/feed_forward.cpp
+    ../../Engine/Layers/embedding_layer.cpp
+    ../../Engine/Layers/language_model.cpp
+    ../../Engine/Layers/ce_loss.cpp
 
-    # Test
-    attention_test.cpp
+
+    ../../Engine/Autograd/rms_norm_op.cpp
+    ../../Engine/Autograd/embedding_op.cpp
+
+    # Normalization
+    ../../Engine/Normalization/rms_norm.cpp
+
+    # Transformer
+    ../../Engine/Transformer/transformer_block.cpp
+    ../../Engine/Transformer/transformer.cpp
+
+    # Tokenizer
+    ../../Engine/Tokenizer/bpe_tokenizer.cpp
+    ../../Engine/Tokenizer/trie.cpp
+
+    final_model_test.cpp
 )
 
 setup_target(attention_test)
