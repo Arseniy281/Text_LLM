@@ -12,6 +12,8 @@
 #include <iostream>
 #include <filesystem>
 
+#include <cuda_runtime.h>
+
 namespace {
 struct ScopedTimer {
     std::string label;
