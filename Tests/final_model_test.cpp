@@ -20,16 +20,15 @@
 
 const size_t VOCAB_SIZE = 1000;
 
-const size_t EMBED_DIM = 32;
-const size_t BLOCKS = 2;
-const size_t HEADS = 2;
-const size_t HIDDEN = 64;
+const size_t EMBED_DIM = 128;
+const size_t BLOCKS = 4;
+const size_t HEADS = 4;
+const size_t HIDDEN = 512;
 
-const size_t CONTEXT = 32;
+const size_t CONTEXT = 128;
 
-// Batch = 1.
-// На каждом шаге берём новое случайное окно из всей книги.
-const size_t STEPS = 20000;
+const size_t BATCH_SIZE = 8;
+const size_t STEPS = 5000;
 
 const float LR = 0.001f;
 
@@ -276,30 +275,43 @@ int main() {
             // Выбираем случайное окно
             // ------------------------------------------------
 
-            size_t start =
-                distribution(generator);
+            // ------------------------------------------------
+            // Выбираем BATCH_SIZE случайных окон
+            // ------------------------------------------------
 
             std::vector<float> input_data(
-                CONTEXT
+                BATCH_SIZE * CONTEXT
             );
 
             std::vector<float> target_data(
-                CONTEXT
+                BATCH_SIZE * CONTEXT
             );
 
-            for (size_t i = 0;
-                 i < CONTEXT;
-                 ++i) {
+            std::vector<size_t> starts(
+                BATCH_SIZE
+            );
 
-                input_data[i] =
-                    static_cast<float>(
-                        tokens[start + i]
-                    );
+            for (size_t b = 0;
+                b < BATCH_SIZE;
+                ++b) {
 
-                target_data[i] =
-                    static_cast<float>(
-                        tokens[start + i + 1]
-                    );
+                starts[b] =
+                    distribution(generator);
+
+                for (size_t i = 0;
+                    i < CONTEXT;
+                    ++i) {
+
+                    input_data[b * CONTEXT + i] =
+                        static_cast<float>(
+                            tokens[starts[b] + i]
+                        );
+
+                    target_data[b * CONTEXT + i] =
+                        static_cast<float>(
+                            tokens[starts[b] + i + 1]
+                        );
+                }
             }
 
             // ------------------------------------------------
@@ -307,12 +319,12 @@ int main() {
             // ------------------------------------------------
 
             Tensor input_cpu(
-                {CONTEXT},
+                {BATCH_SIZE, CONTEXT},
                 std::move(input_data)
             );
 
             Tensor target_cpu(
-                {1, CONTEXT},
+                {BATCH_SIZE, CONTEXT},
                 std::move(target_data)
             );
 
@@ -321,12 +333,12 @@ int main() {
             // ------------------------------------------------
 
             Tensor input(
-                {CONTEXT},
+                {BATCH_SIZE, CONTEXT},
                 Device::CUDA
             );
 
             Tensor target(
-                {1, CONTEXT},
+                {BATCH_SIZE, CONTEXT},
                 Device::CUDA
             );
 
@@ -411,8 +423,6 @@ int main() {
                     << loss_value
                     << " | Avg: "
                     << average_loss
-                    << " | Start: "
-                    << start
                     << "\n";
             }
         }
