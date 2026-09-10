@@ -28,7 +28,7 @@ const size_t HIDDEN = 512;
 const size_t CONTEXT = 128;
 
 const size_t BATCH_SIZE = 8;
-const size_t STEPS = 20000;
+const size_t STEPS = 5000;
 
 const float LR = 0.001f;
 
@@ -386,7 +386,13 @@ int main() {
             // Update
             // ------------------------------------------------
 
-            model.Update(LR);
+            model.UpdateAdamW(
+                LR,
+                0.9f,
+                0.999f,
+                1e-8f,
+                0.01f
+            );
 
             // ------------------------------------------------
             // Statistics
