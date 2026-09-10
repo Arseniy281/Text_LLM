@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <random>
 #include <stdexcept>
@@ -53,8 +54,6 @@ const size_t LOG_EVERY = 100;
 const size_t VALIDATE_EVERY = 500;
 const size_t CHECKPOINT_EVERY = 2000;
 
-// Сколько random validation batch'ей использовать.
-// Не нужно гонять весь корпус для validation.
 const size_t VALIDATION_BATCHES = 20;
 
 // ============================================================
@@ -146,7 +145,83 @@ std::string LoadText(const std::string& filename) {
 }
 
 // ============================================================
-// Создание CUDA batch
+// Tokenizer
+// ============================================================
+
+BPETokenizer PrepareTokenizer(
+    const std::string& corpus
+) {
+    BPETokenizer tokenizer;
+
+    // Если tokenizer уже существует,
+    // просто загружаем его.
+    if (std::filesystem::exists(TOKENIZER_PATH)) {
+        std::cout
+            << "Tokenizer file found.\n"
+            << "Loading tokenizer...\n";
+
+        tokenizer.Load(
+            TOKENIZER_PATH
+        );
+
+        std::cout
+            << "[OK] Tokenizer loaded.\n";
+
+        return tokenizer;
+    }
+
+    // Иначе обучаем его один раз.
+    std::cout
+        << "Tokenizer file not found.\n"
+        << "Training BPE tokenizer...\n\n";
+
+    auto start =
+        std::chrono::steady_clock::now();
+
+    tokenizer.Train(
+        corpus,
+        VOCAB_SIZE
+    );
+
+    auto end =
+        std::chrono::steady_clock::now();
+
+    double seconds =
+        std::chrono::duration<double>(
+            end - start
+        ).count();
+
+    std::cout
+        << "\n[OK] Tokenizer trained.\n"
+        << "Vocab size: "
+        << tokenizer.GetVocabSize()
+        << "\n"
+        << "Time: "
+        << std::fixed
+        << std::setprecision(2)
+        << seconds
+        << " s\n\n";
+
+    std::filesystem::create_directories(
+        std::filesystem::path(
+            TOKENIZER_PATH
+        ).parent_path()
+    );
+
+    tokenizer.Save(
+        TOKENIZER_PATH
+    );
+
+    std::cout
+        << "[OK] Tokenizer saved to:\n"
+        << TOKENIZER_PATH
+        << "\n\n";
+
+    return tokenizer;
+}
+
+// ============================================================
+// Создание random batch
 // ============================================================
 
 void CreateBatch(
@@ -189,7 +264,7 @@ void CreateBatch(
     );
 
     for (size_t b = 0; b < BATCH_SIZE; ++b) {
-        size_t start =
+        const size_t start =
             begin + distribution(generator);
 
         for (size_t i = 0; i < CONTEXT; ++i) {
@@ -267,6 +342,12 @@ float TrainStep(
     float value =
         GetScalar(loss_value);
 
+    if (!std::isfinite(value)) {
+        throw std::runtime_error(
+            "Training loss became NaN or Inf"
+        );
+    }
+
     model.UpdateAdamW(
         LR,
         BETA1,
@@ -276,12 +357,6 @@ float TrainStep(
     );
 
     cudaDeviceSynchronize();
-
-    if (!std::isfinite(value)) {
-        throw std::runtime_error(
-            "Training loss became NaN or Inf"
-        );
-    }
 
     return value;
 }
@@ -300,7 +375,10 @@ float Validate(
 ) {
     double total_loss = 0.0;
 
-    for (size_t i = 0; i < VALIDATION_BATCHES; ++i) {
+    for (size_t i = 0;
+         i < VALIDATION_BATCHES;
+         ++i) {
+
         Tensor input(
             {BATCH_SIZE, CONTEXT},
             Device::CUDA
@@ -350,7 +428,9 @@ float Validate(
 
     return static_cast<float>(
         total_loss /
-        static_cast<double>(VALIDATION_BATCHES)
+        static_cast<double>(
+            VALIDATION_BATCHES
+        )
     );
 }
 
@@ -372,7 +452,9 @@ int main() {
         int device_count = 0;
 
         cudaError_t error =
-            cudaGetDeviceCount(&device_count);
+            cudaGetDeviceCount(
+                &device_count
+            );
 
         if (error != cudaSuccess) {
             throw std::runtime_error(
@@ -415,18 +497,38 @@ int main() {
 
         std::cout
             << "Model:\n"
-            << "  vocab      = " << VOCAB_SIZE << "\n"
-            << "  embed_dim  = " << EMBED_DIM << "\n"
-            << "  blocks     = " << BLOCKS << "\n"
-            << "  heads      = " << HEADS << "\n"
-            << "  hidden     = " << HIDDEN << "\n"
+            << "  vocab      = "
+            << VOCAB_SIZE
+            << "\n"
+            << "  embed_dim  = "
+            << EMBED_DIM
+            << "\n"
+            << "  blocks     = "
+            << BLOCKS
+            << "\n"
+            << "  heads      = "
+            << HEADS
+            << "\n"
+            << "  hidden     = "
+            << HIDDEN
+            << "\n"
             << "\n"
             << "Training:\n"
-            << "  context    = " << CONTEXT << "\n"
-            << "  batch      = " << BATCH_SIZE << "\n"
-            << "  steps      = " << STEPS << "\n"
-            << "  lr         = " << LR << "\n"
-            << "  weight dec = " << WEIGHT_DECAY << "\n"
+            << "  context    = "
+            << CONTEXT
+            << "\n"
+            << "  batch      = "
+            << BATCH_SIZE
+            << "\n"
+            << "  steps      = "
+            << STEPS
+            << "\n"
+            << "  lr         = "
+            << LR
+            << "\n"
+            << "  weight dec = "
+            << WEIGHT_DECAY
+            << "\n"
             << "\n";
 
         // ====================================================
@@ -448,25 +550,16 @@ int main() {
         // Tokenizer
         // ====================================================
 
-        std::cout
-            << "Loading tokenizer...\n";
+        BPETokenizer tokenizer =
+            PrepareTokenizer(corpus);
 
-        BPETokenizer tokenizer;
+        if (tokenizer.GetVocabSize() !=
+            VOCAB_SIZE) {
 
-        tokenizer.Load(
-            TOKENIZER_PATH
-        );
-
-        if (tokenizer.GetVocabSize() != VOCAB_SIZE) {
             throw std::runtime_error(
-                "Tokenizer vocabulary size does not match model VOCAB_SIZE"
+                "Tokenizer vocabulary size does not match VOCAB_SIZE"
             );
         }
-
-        std::cout
-            << "Tokenizer vocab: "
-            << tokenizer.GetVocabSize()
-            << "\n";
 
         // ====================================================
         // Encode
@@ -475,16 +568,33 @@ int main() {
         std::cout
             << "Encoding corpus...\n";
 
+        auto encode_start =
+            std::chrono::steady_clock::now();
+
         std::vector<size_t> tokens =
             tokenizer.Encode(corpus);
+
+        auto encode_end =
+            std::chrono::steady_clock::now();
+
+        double encode_seconds =
+            std::chrono::duration<double>(
+                encode_end - encode_start
+            ).count();
 
         std::cout
             << "Tokens: "
             << tokens.size()
-            << "\n\n";
+            << "\n"
+            << "Encoding time: "
+            << std::fixed
+            << std::setprecision(2)
+            << encode_seconds
+            << " s\n\n";
 
-        if (tokens.size() <
+        if (tokens.size() <=
             CONTEXT + 100) {
+
             throw std::runtime_error(
                 "Not enough tokens for training"
             );
@@ -498,7 +608,8 @@ int main() {
             tokens.size() / 10;
 
         const size_t train_end =
-            tokens.size() - validation_tokens;
+            tokens.size() -
+            validation_tokens;
 
         const size_t validation_begin =
             train_end;
@@ -513,15 +624,14 @@ int main() {
             << "\n\n";
 
         // ====================================================
-        // Random generator
+        // Random generators
         // ====================================================
 
         std::mt19937 generator(42);
 
-        // Отдельный генератор validation,
-        // чтобы validation не зависел
-        // от количества train steps.
-        std::mt19937 validation_generator(12345);
+        std::mt19937 validation_generator(
+            12345
+        );
 
         // ====================================================
         // Model
@@ -545,7 +655,7 @@ int main() {
         CrossEntropyLoss loss;
 
         // ====================================================
-        // Training
+        // Checkpoint directory
         // ====================================================
 
         std::filesystem::create_directories(
@@ -553,7 +663,8 @@ int main() {
         );
 
         std::ofstream log_file(
-            CHECKPOINT_DIR + "/training.log",
+            CHECKPOINT_DIR +
+            "/training.log",
             std::ios::app
         );
 
@@ -569,16 +680,42 @@ int main() {
             << "========================================\n";
 
         log_file
-            << "Vocab: " << VOCAB_SIZE << "\n"
-            << "Embed: " << EMBED_DIM << "\n"
-            << "Blocks: " << BLOCKS << "\n"
-            << "Heads: " << HEADS << "\n"
-            << "Hidden: " << HIDDEN << "\n"
-            << "Context: " << CONTEXT << "\n"
-            << "Batch: " << BATCH_SIZE << "\n"
-            << "Steps: " << STEPS << "\n"
-            << "LR: " << LR << "\n"
-            << "WeightDecay: " << WEIGHT_DECAY << "\n";
+            << "Vocab: "
+            << VOCAB_SIZE
+            << "\n"
+            << "Embed: "
+            << EMBED_DIM
+            << "\n"
+            << "Blocks: "
+            << BLOCKS
+            << "\n"
+            << "Heads: "
+            << HEADS
+            << "\n"
+            << "Hidden: "
+            << HIDDEN
+            << "\n"
+            << "Context: "
+            << CONTEXT
+            << "\n"
+            << "Batch: "
+            << BATCH_SIZE
+            << "\n"
+            << "Steps: "
+            << STEPS
+            << "\n"
+            << "LR: "
+            << LR
+            << "\n"
+            << "WeightDecay: "
+            << WEIGHT_DECAY
+            << "\n";
+
+        log_file.flush();
+
+        // ====================================================
+        // Training
+        // ====================================================
 
         double loss_sum = 0.0;
 
@@ -636,12 +773,15 @@ int main() {
             if (step % LOG_EVERY == 0 ||
                 step == 1) {
 
+                const size_t samples =
+                    step == 1
+                        ? 1
+                        : LOG_EVERY;
+
                 const double avg_loss =
                     loss_sum /
                     static_cast<double>(
-                        step % LOG_EVERY == 0
-                            ? LOG_EVERY
-                            : step
+                        samples
                     );
 
                 loss_sum = 0.0;
@@ -655,7 +795,9 @@ int main() {
                     ).count();
 
                 double steps_per_second =
-                    LOG_EVERY / elapsed;
+                    step == 1
+                        ? 1.0 / elapsed
+                        : LOG_EVERY / elapsed;
 
                 last_log_time = now;
 
@@ -695,6 +837,7 @@ int main() {
             // =================================================
 
             if (step % VALIDATE_EVERY == 0) {
+
                 float validation_loss =
                     Validate(
                         model,
@@ -723,6 +866,10 @@ int main() {
 
                 log_file.flush();
 
+                // =============================================
+                // Best model
+                // =============================================
+
                 if (validation_loss <
                     best_validation_loss) {
 
@@ -746,14 +893,18 @@ int main() {
                     );
 
                     cudaDeviceSynchronize();
+
+                    std::cout
+                        << "           [OK] Best model saved.\n";
                 }
             }
 
             // =================================================
-            // Checkpoint
+            // Regular checkpoint
             // =================================================
 
             if (step % CHECKPOINT_EVERY == 0) {
+
                 const std::string checkpoint =
                     CHECKPOINT_DIR +
                     "/step_" +
@@ -787,22 +938,24 @@ int main() {
         cudaDeviceSynchronize();
 
         model.SaveModel(
-            CHECKPOINT_DIR + "/final"
+            CHECKPOINT_DIR +
+            "/final"
         );
 
         cudaDeviceSynchronize();
+
+        // ====================================================
+        // Result
+        // ====================================================
 
         auto training_end =
             std::chrono::steady_clock::now();
 
         double total_seconds =
             std::chrono::duration<double>(
-                training_end - training_start
+                training_end -
+                training_start
             ).count();
-
-        // ====================================================
-        // Result
-        // ====================================================
 
         std::cout
             << "\n========================================\n"
@@ -823,11 +976,13 @@ int main() {
 
         std::cout
             << "Average: "
+            << std::setprecision(2)
             << STEPS / total_seconds
             << " step/s\n";
 
         std::cout
             << "Best validation loss: "
+            << std::setprecision(5)
             << best_validation_loss
             << "\n";
 
@@ -842,6 +997,7 @@ int main() {
         return 0;
     }
     catch (const std::exception& e) {
+
         std::cerr
             << "\n========================================\n"
             << "                FAILED\n"
