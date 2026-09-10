@@ -3,6 +3,7 @@
 #include "../Engine/Transformer/transformer.h"
 #include "../Engine/Tokenizer/bpe_tokenizer.h"
 #include "../Engine/Layers/language_model.h"
+#include "../Engine/Layers/ce_loss.h"
 
 #include <cuda_runtime.h>
 
@@ -310,14 +311,17 @@ int main() {
 
         cudaDeviceSynchronize();
 
+        auto old_loss_cpu = CopyToCPU(loss_value_old);
+        auto adamw_loss_cpu = CopyToCPU(loss_value_adamw);
+
         std::cout
             << "Old loss:   "
-            << loss_value_old.Data()[0]
+            << old_loss_cpu[0]
             << "\n";
 
         std::cout
             << "AdamW loss: "
-            << loss_value_adamw.Data()[0]
+            << adamw_loss_cpu[0]
             << "\n\n";
 
         // ====================================================
@@ -395,18 +399,10 @@ int main() {
 
         CompareTensors(
             "Embedding",
-            old_before.GetEmbedding(),
-            old_model.GetEmbedding(),
-            adamw_before.GetEmbedding(),
-            adamw_model.GetEmbedding()
-        );
-
-        CompareTensors(
-            "LM head",
-            old_before.GetLMHead().GetWeights(),
-            old_model.GetLMHead().GetWeights(),
-            adamw_before.GetLMHead().GetWeights(),
-            adamw_model.GetLMHead().GetWeights()
+            old_before.GetEmbeddings(),
+            old_model.GetEmbeddings(),
+            adamw_before.GetEmbeddings(),
+            adamw_model.GetEmbeddings()
         );
 
         std::cout
