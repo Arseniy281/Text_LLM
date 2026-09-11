@@ -13,7 +13,6 @@
 #include <random>
 #include <iomanip>
 #include <stdexcept>
-#include <algorithm>
 
 // ============================================================
 // Настройки
@@ -70,7 +69,9 @@ float GetScalar(const Tensor& tensor) {
 
     if (error != cudaSuccess) {
         throw std::runtime_error(
-            std::string("GetScalar cudaMemcpy failed: ") +
+            std::string(
+                "GetScalar cudaMemcpy failed: "
+            ) +
             cudaGetErrorString(error)
         );
     }
@@ -79,7 +80,7 @@ float GetScalar(const Tensor& tensor) {
 }
 
 // ============================================================
-// Создать CUDA tensor из vector<float>
+// Создать CUDA Tensor из vector<float>
 // ============================================================
 
 Tensor MakeCUDATensor(
@@ -103,7 +104,7 @@ Tensor MakeCUDATensor(
 }
 
 // ============================================================
-// Посчитать validation loss
+// Validation loss
 // ============================================================
 
 float CalculateValidationLoss(
@@ -114,19 +115,14 @@ float CalculateValidationLoss(
     size_t validation_end,
     std::mt19937& generator
 ) {
-    if (validation_end <= validation_start + CONTEXT) {
-        throw std::runtime_error(
-            "Validation dataset is too small"
-        );
-    }
-
     size_t max_start =
         validation_end - CONTEXT - 1;
 
-    std::uniform_int_distribution<size_t> distribution(
-        validation_start,
-        max_start
-    );
+    std::uniform_int_distribution<size_t>
+        distribution(
+            validation_start,
+            max_start
+        );
 
     double loss_sum = 0.0;
 
@@ -146,7 +142,8 @@ float CalculateValidationLoss(
              b < BATCH_SIZE;
              ++b) {
 
-            size_t start = distribution(generator);
+            size_t start =
+                distribution(generator);
 
             for (size_t i = 0;
                  i < CONTEXT;
@@ -187,20 +184,16 @@ float CalculateValidationLoss(
                 std::move(input)
             );
 
-        // ----------------------------------------------------
-        // ВАЖНО:
-        // validation не должен строить/накапливать градиенты.
-        // Пока используем тот же forward, но после него
-        // градиенты очищаем и ничего не обновляем.
-        // ----------------------------------------------------
-
         model.ClearGrad();
 
         auto logits =
             model.forward(input_ptr);
 
         Tensor current_loss =
-            loss.forward(*logits, target);
+            loss.forward(
+                *logits,
+                target
+            );
 
         float value =
             GetScalar(current_loss);
@@ -212,7 +205,9 @@ float CalculateValidationLoss(
 
     return static_cast<float>(
         loss_sum /
-        static_cast<double>(VALIDATION_BATCHES)
+        static_cast<double>(
+            VALIDATION_BATCHES
+        )
     );
 }
 
@@ -222,9 +217,10 @@ float CalculateValidationLoss(
 
 int main() {
     try {
-        std::cout << "========================================\n";
-        std::cout << " RANDOM WINDOW CUDA TRAIN/VALIDATION TEST\n";
-        std::cout << "========================================\n\n";
+        std::cout
+            << "========================================\n"
+            << " CUDA TRAIN / VALIDATION TEST\n"
+            << "========================================\n\n";
 
         // ====================================================
         // CUDA
@@ -233,7 +229,9 @@ int main() {
         int device_count = 0;
 
         cudaError_t cuda_error =
-            cudaGetDeviceCount(&device_count);
+            cudaGetDeviceCount(
+                &device_count
+            );
 
         if (cuda_error != cudaSuccess) {
             throw std::runtime_error(
@@ -296,20 +294,26 @@ int main() {
             << " characters\n\n";
 
         // ====================================================
-        // TOKENIZER
+        // TRAIN BPE TOKENIZER
         // ====================================================
 
         std::cout
             << "========================================\n"
-            << "           TOKENIZATION\n"
+            << "        TRAINING BPE TOKENIZER\n"
             << "========================================\n";
 
         BPETokenizer tokenizer;
 
-        tokenizer.Load(TOKENIZER_PATH);
+        std::cout
+            << "Training tokenizer...\n";
+
+        tokenizer.Train(
+            text,
+            VOCAB_SIZE
+        );
 
         std::cout
-            << "Tokenizer loaded.\n";
+            << "Tokenizer trained.\n";
 
         std::cout
             << "Vocab size: "
@@ -321,6 +325,27 @@ int main() {
                 "Tokenizer vocabulary size does not match model"
             );
         }
+
+        tokenizer.Save(
+            TOKENIZER_PATH
+        );
+
+        std::cout
+            << "Tokenizer saved to:\n"
+            << TOKENIZER_PATH
+            << "\n\n";
+
+        // ====================================================
+        // ENCODE
+        // ====================================================
+
+        std::cout
+            << "========================================\n"
+            << "             TOKENIZATION\n"
+            << "========================================\n";
+
+        std::cout
+            << "Encoding corpus...\n";
 
         std::vector<size_t> tokens =
             tokenizer.Encode(text);
@@ -336,8 +361,10 @@ int main() {
 
         const size_t train_tokens =
             static_cast<size_t>(
-                static_cast<double>(tokens.size())
-                * TRAIN_RATIO
+                static_cast<double>(
+                    tokens.size()
+                ) *
+                TRAIN_RATIO
             );
 
         const size_t validation_start =
@@ -346,10 +373,9 @@ int main() {
         const size_t validation_end =
             tokens.size();
 
-        const size_t train_max_start =
-            train_tokens - CONTEXT - 1;
+        if (train_tokens <=
+            CONTEXT + 1) {
 
-        if (train_tokens <= CONTEXT + 1) {
             throw std::runtime_error(
                 "Training dataset is too small"
             );
@@ -363,15 +389,27 @@ int main() {
             );
         }
 
+        const size_t train_max_start =
+            train_tokens - CONTEXT - 1;
+
         std::cout
-            << "Dataset split:\n"
-            << "  Train tokens: "
+            << "========================================\n"
+            << "          DATASET SPLIT\n"
+            << "========================================\n";
+
+        std::cout
+            << "Train tokens: "
             << train_tokens
-            << '\n'
-            << "  Validation tokens: "
-            << validation_end - validation_start
-            << '\n'
-            << "  Train ratio: "
+            << '\n';
+
+        std::cout
+            << "Validation tokens: "
+            << validation_end -
+               validation_start
+            << '\n';
+
+        std::cout
+            << "Train ratio: "
             << TRAIN_RATIO
             << "\n\n";
 
@@ -438,12 +476,13 @@ int main() {
             Device::CUDA
         );
 
+        // KV-cache во время обучения не используется.
         model.SetUseKVCache(false);
 
         CrossEntropyLoss loss;
 
         // ====================================================
-        // RANDOM GENERATORS
+        // RANDOM
         // ====================================================
 
         std::mt19937 generator(42);
@@ -454,7 +493,9 @@ int main() {
                 train_max_start
             );
 
-        std::mt19937 validation_generator(12345);
+        std::mt19937 validation_generator(
+            12345
+        );
 
         // ====================================================
         // TRAINING
@@ -475,7 +516,7 @@ int main() {
              ++step) {
 
             // ------------------------------------------------
-            // TRAINING BATCH
+            // Создаём случайный batch
             // ------------------------------------------------
 
             std::vector<float> input_data(
@@ -491,7 +532,9 @@ int main() {
                  ++b) {
 
                 size_t start =
-                    train_distribution(generator);
+                    train_distribution(
+                        generator
+                    );
 
                 for (size_t i = 0;
                      i < CONTEXT;
@@ -513,6 +556,10 @@ int main() {
                 }
             }
 
+            // ------------------------------------------------
+            // CPU -> CUDA
+            // ------------------------------------------------
+
             Tensor input =
                 MakeCUDATensor(
                     input_data,
@@ -527,15 +574,25 @@ int main() {
                     CONTEXT
                 );
 
-            model.ClearGrad();
-
             auto input_ptr =
                 std::make_shared<Tensor>(
                     std::move(input)
                 );
 
+            // ------------------------------------------------
+            // Forward
+            // ------------------------------------------------
+
+            model.ClearGrad();
+
             auto logits =
-                model.forward(input_ptr);
+                model.forward(
+                    input_ptr
+                );
+
+            // ------------------------------------------------
+            // Loss
+            // ------------------------------------------------
 
             Tensor current_loss =
                 loss.forward(
@@ -544,7 +601,13 @@ int main() {
                 );
 
             float loss_value =
-                GetScalar(current_loss);
+                GetScalar(
+                    current_loss
+                );
+
+            // ------------------------------------------------
+            // Backward
+            // ------------------------------------------------
 
             Tensor loss_grad =
                 loss.backward();
@@ -552,6 +615,10 @@ int main() {
             logits->backward(
                 loss_grad
             );
+
+            // ------------------------------------------------
+            // AdamW
+            // ------------------------------------------------
 
             model.UpdateAdamW(
                 LR,
@@ -564,7 +631,7 @@ int main() {
             model.ClearGrad();
 
             // ------------------------------------------------
-            // STATISTICS
+            // Statistics
             // ------------------------------------------------
 
             if (step == 0) {
@@ -575,10 +642,11 @@ int main() {
             final_train_loss =
                 loss_value;
 
-            train_loss_sum += loss_value;
+            train_loss_sum +=
+                loss_value;
 
             // ------------------------------------------------
-            // LOGGING
+            // Logging
             // ------------------------------------------------
 
             if (step % 100 == 0 ||
@@ -604,7 +672,7 @@ int main() {
             }
 
             // ------------------------------------------------
-            // VALIDATION
+            // Validation
             // ------------------------------------------------
 
             if (step == 0 ||
@@ -637,7 +705,9 @@ int main() {
 
         double average_train_loss =
             train_loss_sum /
-            static_cast<double>(STEPS);
+            static_cast<double>(
+                STEPS
+            );
 
         std::cout
             << "\n========================================\n"
@@ -661,8 +731,8 @@ int main() {
 
         std::cout
             << "Loss change:        "
-            << final_train_loss
-               - initial_train_loss
+            << final_train_loss -
+               initial_train_loss
             << '\n';
 
         if (final_train_loss <
