@@ -27,7 +27,7 @@ const size_t HEADS = 4;
 const size_t HIDDEN = 512;
 
 const size_t CONTEXT = 128;
-const size_t BATCH_SIZE = 8;
+const size_t BATCH_SIZE = 16;
 
 const size_t STEPS = 10000;
 
