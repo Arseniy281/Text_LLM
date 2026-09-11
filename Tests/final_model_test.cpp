@@ -323,20 +323,20 @@ int main() {
             // ------------------------------------------------
 
             Tensor logits_cpu(
-                logits.GetShape(),
+                logits->GetShape(),
                 0.0f,
                 Device::CPU
             );
 
             cudaMemcpy(
                 logits_cpu.Data(),
-                logits.Data(),
-                logits.GetSize() * sizeof(float),
+                logits->Data(),
+                logits->GetSize() * sizeof(float),
                 cudaMemcpyDeviceToHost
             );
 
             const auto& shape =
-                logits.GetShape();
+                logits->GetShape();
 
             size_t sequence_length =
                 shape[1];
