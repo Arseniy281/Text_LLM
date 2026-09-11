@@ -22,7 +22,7 @@ const std::string TOKENIZER_PATH =
     "../Models/MargaritaTokenizer";
 
 const std::string MODEL_PATH =
-    "../Models/MargaritaCUDA/step_20000";
+    "../Models/MargaritaLR2000_final";
 
 const std::string CORPUS_PATH =
     "../Data/master_and_margarita.txt";
