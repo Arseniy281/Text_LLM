@@ -1,961 +1,696 @@
+#include "../Engine/Layers/language_model.h"
+#include "../Engine/Layers/ce_loss.h"
+#include "../Engine/Tokenizer/bpe_tokenizer.h"
+#include "../Engine/Tensor/tensor.h"
+#include "../Engine/Tensor/device.h"
+
+#include <cuda_runtime.h>
+
 #include <iostream>
 #include <vector>
 #include <cmath>
-#include <algorithm>
-#include <iomanip>
+#include <fstream>
 #include <random>
-#include <string>
-
-#include "../Engine/Tensor/tensor.h"
-#include "../Engine/Attention/rope.h"
-#include "../Engine/Attention/softmax.h"
-#include "../Engine/Layers/linear_layer.h"
-#include "../Engine/Layers/language_model.h"
-
+#include <iomanip>
+#include <stdexcept>
+#include <algorithm>
 
 // ============================================================
-// Helpers
+// Настройки
 // ============================================================
 
-static constexpr float TEST_EPS = 1e-4f;
+const size_t VOCAB_SIZE = 1000;
 
-struct TestResult {
-    std::string name;
-    bool passed;
-};
+const size_t EMBED_DIM = 128;
+const size_t BLOCKS = 4;
+const size_t HEADS = 4;
+const size_t HIDDEN = 512;
 
-std::vector<TestResult> results;
+const size_t CONTEXT = 128;
 
+const size_t BATCH_SIZE = 8;
+const size_t STEPS = 2000;
 
-bool AlmostEqual(float a, float b, float eps = TEST_EPS) {
-    return std::fabs(a - b) <= eps;
-}
+const float LR = 0.001f;
 
+const size_t VALIDATION_INTERVAL = 500;
+const size_t VALIDATION_BATCHES = 20;
 
-float MaxDiff(const Tensor& a, const Tensor& b) {
-    if (a.GetShape() != b.GetShape()) {
-        return INFINITY;
-    }
+const float TRAIN_RATIO = 0.9f;
 
-    float max_diff = 0.0f;
+const std::string DATA_PATH =
+    "../Data/master_and_margarita.txt";
 
-    for (size_t i = 0; i < a.GetSize(); i++) {
-        float diff = std::fabs(a.at(i) - b.at(i));
-
-        if (diff > max_diff) {
-            max_diff = diff;
-        }
-    }
-
-    return max_diff;
-}
-
-
-float MeanDiff(const Tensor& a, const Tensor& b) {
-    if (a.GetShape() != b.GetShape()) {
-        return INFINITY;
-    }
-
-    if (a.GetSize() == 0) {
-        return 0.0f;
-    }
-
-    float sum = 0.0f;
-
-    for (size_t i = 0; i < a.GetSize(); i++) {
-        sum += std::fabs(a.at(i) - b.at(i));
-    }
-
-    return sum / static_cast<float>(a.GetSize());
-}
-
-
-void Report(const std::string& name, bool passed) {
-    results.push_back({name, passed});
-
-    std::cout
-        << (passed ? "[PASS] " : "[FAIL] ")
-        << name
-        << "\n";
-}
-
-
-void PrintSeparator() {
-    std::cout
-        << "------------------------------------------------------------\n";
-}
-
+const std::string TOKENIZER_PATH =
+    "../Models/MargaritaTokenizer";
 
 // ============================================================
-// TEST 1: Tensor
+// Получить scalar из Tensor
 // ============================================================
 
-bool TestTensorBasic() {
-    std::cout << "\n";
-    PrintSeparator();
-    std::cout << "TEST 1: Tensor basic operations\n";
-    PrintSeparator();
-
-    Tensor a({2, 3});
-
-    for (size_t i = 0; i < a.GetSize(); i++) {
-        a.at(i) = static_cast<float>(i + 1);
+float GetScalar(const Tensor& tensor) {
+    if (tensor.GetSize() != 1) {
+        throw std::runtime_error(
+            "GetScalar: tensor must contain exactly one value"
+        );
     }
 
-    bool shape_ok =
-        a.GetRank() == 2 &&
-        a.GetShape()[0] == 2 &&
-        a.GetShape()[1] == 3 &&
-        a.GetSize() == 6;
+    if (tensor.GetDevice() == Device::CPU) {
+        return tensor.at(0);
+    }
 
-    Tensor b({2, 3}, 2.0f);
+    float value = 0.0f;
 
-    Tensor c = a + b;
+    cudaError_t error = cudaMemcpy(
+        &value,
+        tensor.Data(),
+        sizeof(float),
+        cudaMemcpyDeviceToHost
+    );
 
-    bool values_ok =
-        AlmostEqual(c.at({0, 0}), 3.0f) &&
-        AlmostEqual(c.at({0, 1}), 4.0f) &&
-        AlmostEqual(c.at({1, 2}), 8.0f);
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string("GetScalar cudaMemcpy failed: ") +
+            cudaGetErrorString(error)
+        );
+    }
 
-    Tensor d = a * 2.0f;
-
-    bool mul_ok =
-        AlmostEqual(d.at({0, 0}), 2.0f) &&
-        AlmostEqual(d.at({1, 2}), 12.0f);
-
-    Tensor e = a / 2.0f;
-
-    bool div_ok =
-        AlmostEqual(e.at({0, 0}), 0.5f) &&
-        AlmostEqual(e.at({1, 2}), 3.0f);
-
-    Tensor t = a.Transpose();
-
-    bool transpose_ok =
-        t.GetShape()[0] == 3 &&
-        t.GetShape()[1] == 2 &&
-        AlmostEqual(t.at({0, 0}), 1.0f) &&
-        AlmostEqual(t.at({0, 1}), 4.0f) &&
-        AlmostEqual(t.at({2, 1}), 6.0f);
-
-    bool passed =
-        shape_ok &&
-        values_ok &&
-        mul_ok &&
-        div_ok &&
-        transpose_ok;
-
-    std::cout << "shape:      " << (shape_ok ? "OK" : "FAIL") << "\n";
-    std::cout << "addition:   " << (values_ok ? "OK" : "FAIL") << "\n";
-    std::cout << "multiply:   " << (mul_ok ? "OK" : "FAIL") << "\n";
-    std::cout << "divide:     " << (div_ok ? "OK" : "FAIL") << "\n";
-    std::cout << "transpose:  " << (transpose_ok ? "OK" : "FAIL") << "\n";
-
-    Report("Tensor basic operations", passed);
-
-    return passed;
+    return value;
 }
 
+// ============================================================
+// Создать CUDA tensor из vector<float>
+// ============================================================
+
+Tensor MakeCUDATensor(
+    const std::vector<float>& data,
+    size_t first_dim,
+    size_t second_dim
+) {
+    Tensor cpu(
+        {first_dim, second_dim},
+        std::vector<float>(data)
+    );
+
+    Tensor cuda_tensor(
+        {first_dim, second_dim},
+        Device::CUDA
+    );
+
+    cpu.CopyToCUDA(cuda_tensor);
+
+    return cuda_tensor;
+}
 
 // ============================================================
-// TEST 2: RoPE
+// Посчитать validation loss
 // ============================================================
 
-bool TestRoPE() {
-    std::cout << "\n";
-    PrintSeparator();
-    std::cout << "TEST 2: RoPE\n";
-    PrintSeparator();
-
-    // batch = 2
-    // seq_len = 4
-    // head_dim = 8
-    Tensor x({2, 4, 8});
-
-    for (size_t i = 0; i < x.GetSize(); i++) {
-        x.at(i) =
-            std::sin(static_cast<float>(i) * 0.37f) +
-            0.1f * static_cast<float>(i);
+float CalculateValidationLoss(
+    LanguageModel& model,
+    CrossEntropyLoss& loss,
+    const std::vector<size_t>& tokens,
+    size_t validation_start,
+    size_t validation_end,
+    std::mt19937& generator
+) {
+    if (validation_end <= validation_start + CONTEXT) {
+        throw std::runtime_error(
+            "Validation dataset is too small"
+        );
     }
 
-    // --------------------------------------------------------
-    // 2.1 RoPE should preserve vector norm for every pair
-    // --------------------------------------------------------
+    size_t max_start =
+        validation_end - CONTEXT - 1;
 
-    Tensor rotated = RoPE(x, 0);
+    std::uniform_int_distribution<size_t> distribution(
+        validation_start,
+        max_start
+    );
 
-    float max_norm_diff = 0.0f;
+    double loss_sum = 0.0;
 
-    for (size_t b = 0; b < 2; b++) {
-        for (size_t s = 0; s < 4; s++) {
-            for (size_t d = 0; d < 8; d += 2) {
+    for (size_t batch = 0;
+         batch < VALIDATION_BATCHES;
+         ++batch) {
 
-                float x1 = x.at({b, s, d});
-                float x2 = x.at({b, s, d + 1});
+        std::vector<float> input_data(
+            BATCH_SIZE * CONTEXT
+        );
 
-                float y1 = rotated.at({b, s, d});
-                float y2 = rotated.at({b, s, d + 1});
+        std::vector<float> target_data(
+            BATCH_SIZE * CONTEXT
+        );
 
-                float before = x1 * x1 + x2 * x2;
-                float after = y1 * y1 + y2 * y2;
+        for (size_t b = 0;
+             b < BATCH_SIZE;
+             ++b) {
 
-                float diff = std::fabs(before - after);
+            size_t start = distribution(generator);
 
-                max_norm_diff =
-                    std::max(max_norm_diff, diff);
+            for (size_t i = 0;
+                 i < CONTEXT;
+                 ++i) {
+
+                input_data[
+                    b * CONTEXT + i
+                ] =
+                    static_cast<float>(
+                        tokens[start + i]
+                    );
+
+                target_data[
+                    b * CONTEXT + i
+                ] =
+                    static_cast<float>(
+                        tokens[start + i + 1]
+                    );
             }
         }
-    }
 
-    bool norm_ok = max_norm_diff < 1e-4f;
-
-    std::cout
-        << "Norm preservation max diff: "
-        << max_norm_diff
-        << "\n";
-
-    // --------------------------------------------------------
-    // 2.2 RoPE backward should undo RoPE
-    // --------------------------------------------------------
-
-    Tensor restored = RoPE_backward(rotated, 0);
-
-    float restore_diff = MaxDiff(x, restored);
-
-    bool inverse_ok = restore_diff < 1e-4f;
-
-    std::cout
-        << "RoPE -> backward -> original max diff: "
-        << restore_diff
-        << "\n";
-
-    // --------------------------------------------------------
-    // 2.3 start_pos should actually change rotation
-    // --------------------------------------------------------
-
-    Tensor rope0 = RoPE(x, 0);
-    Tensor rope10 = RoPE(x, 10);
-
-    float position_diff = MaxDiff(rope0, rope10);
-
-    bool position_ok = position_diff > 1e-5f;
-
-    std::cout
-        << "start_pos=0 vs start_pos=10 max diff: "
-        << position_diff
-        << "\n";
-
-    // --------------------------------------------------------
-    // 2.4 start_pos + backward
-    // --------------------------------------------------------
-
-    Tensor rope100 = RoPE(x, 100);
-    Tensor restored100 = RoPE_backward(rope100, 100);
-
-    float restore100_diff = MaxDiff(x, restored100);
-
-    bool inverse100_ok = restore100_diff < 1e-4f;
-
-    std::cout
-        << "RoPE(start=100) inverse max diff: "
-        << restore100_diff
-        << "\n";
-
-    bool passed =
-        norm_ok &&
-        inverse_ok &&
-        position_ok &&
-        inverse100_ok;
-
-    Report("RoPE correctness", passed);
-
-    return passed;
-}
-
-
-// ============================================================
-// TEST 3: Softmax
-// ============================================================
-
-bool TestSoftmax() {
-    std::cout << "\n";
-    PrintSeparator();
-    std::cout << "TEST 3: Softmax\n";
-    PrintSeparator();
-
-    Softmax softmax;
-
-    Tensor x({5});
-
-    x.at(0) = 1.0f;
-    x.at(1) = 2.0f;
-    x.at(2) = 3.0f;
-    x.at(3) = -2.0f;
-    x.at(4) = 0.5f;
-
-    auto x_ptr = std::make_shared<Tensor>(x);
-
-    auto y = softmax.forward(x_ptr);
-
-    float sum = 0.0f;
-    float min_value = y->at(0);
-    float max_value = y->at(0);
-
-    for (size_t i = 0; i < y->GetSize(); i++) {
-        sum += y->at(i);
-
-        min_value = std::min(min_value, y->at(i));
-        max_value = std::max(max_value, y->at(i));
-    }
-
-    bool sum_ok =
-        std::fabs(sum - 1.0f) < 1e-5f;
-
-    bool range_ok =
-        min_value >= 0.0f &&
-        max_value <= 1.0f;
-
-    std::cout << "Probabilities: ";
-
-    for (size_t i = 0; i < y->GetSize(); i++) {
-        std::cout << y->at(i) << " ";
-    }
-
-    std::cout << "\n";
-    std::cout << "Sum = " << sum << "\n";
-
-    // --------------------------------------------------------
-    // Backward through autograd
-    // --------------------------------------------------------
-
-    Tensor grad({5}, 1.0f);
-
-    y->backward(grad);
-
-    auto grad_x = x_ptr->Grad();
-
-    bool backward_ok = false;
-
-    if (grad_x != nullptr) {
-        float max_grad = 0.0f;
-
-        for (size_t i = 0; i < grad_x->GetSize(); i++) {
-            max_grad = std::max(
-                max_grad,
-                std::fabs(grad_x->at(i))
+        Tensor input =
+            MakeCUDATensor(
+                input_data,
+                BATCH_SIZE,
+                CONTEXT
             );
-        }
 
-        backward_ok = max_grad < 1e-5f;
+        Tensor target =
+            MakeCUDATensor(
+                target_data,
+                BATCH_SIZE,
+                CONTEXT
+            );
 
-        std::cout
-            << "Softmax backward max diff from zero: "
-            << max_grad
-            << "\n";
-    } else {
-        std::cout
-            << "Softmax backward gradient is NULL\n";
+        auto input_ptr =
+            std::make_shared<Tensor>(
+                std::move(input)
+            );
+
+        // ----------------------------------------------------
+        // ВАЖНО:
+        // validation не должен строить/накапливать градиенты.
+        // Пока используем тот же forward, но после него
+        // градиенты очищаем и ничего не обновляем.
+        // ----------------------------------------------------
+
+        model.ClearGrad();
+
+        auto logits =
+            model.forward(input_ptr);
+
+        Tensor current_loss =
+            loss.forward(*logits, target);
+
+        float value =
+            GetScalar(current_loss);
+
+        loss_sum += value;
+
+        model.ClearGrad();
     }
 
-    bool passed =
-        sum_ok &&
-        range_ok &&
-        backward_ok;
-
-    Report("Softmax correctness", passed);
-
-    return passed;
-}
-
-
-// ============================================================
-// TEST 4: Top-P
-// ============================================================
-
-bool TestTopP() {
-    std::cout << "\n";
-    PrintSeparator();
-    std::cout << "TEST 4: Top-P\n";
-    PrintSeparator();
-
-    // Small model just to access public TopP().
-    LanguageModel model(
-        6,      // vocab
-        8,      // embed dim
-        1,      // blocks
-        1,      // heads
-        16      // hidden
+    return static_cast<float>(
+        loss_sum /
+        static_cast<double>(VALIDATION_BATCHES)
     );
-
-    Tensor probs({6});
-
-    probs.at(0) = 0.40f;
-    probs.at(1) = 0.25f;
-    probs.at(2) = 0.15f;
-    probs.at(3) = 0.10f;
-    probs.at(4) = 0.06f;
-    probs.at(5) = 0.04f;
-
-    model.TopP(probs, 0.81f);
-
-    float sum = 0.0f;
-    size_t non_zero = 0;
-
-    for (size_t i = 0; i < probs.GetSize(); i++) {
-        sum += probs.at(i);
-
-        if (probs.at(i) > 0.0f) {
-            non_zero++;
-        }
-    }
-
-    std::cout << "After Top-P:\n";
-
-    for (size_t i = 0; i < probs.GetSize(); i++) {
-        std::cout
-            << "  token "
-            << i
-            << ": "
-            << probs.at(i)
-            << "\n";
-    }
-
-    std::cout << "Sum: " << sum << "\n";
-    std::cout << "Non-zero tokens: " << non_zero << "\n";
-
-    bool sum_ok =
-        std::fabs(sum - 1.0f) < 1e-5f;
-
-    // 0.40 + 0.25 + 0.15 = 0.80
-    // Therefore three tokens should survive.
-    bool border_ok = non_zero == 4;
-
-    bool tail_zero =
-        probs.at(4) == 0.0f &&
-        probs.at(5) == 0.0f;
-
-    bool passed =
-        sum_ok &&
-        border_ok &&
-        tail_zero;
-
-    Report("Top-P correctness", passed);
-
-    return passed;
 }
-
-
-// ============================================================
-// Helper for creating token tensor
-// ============================================================
-
-Tensor MakeTokenTensor(
-    const std::vector<int>& tokens,
-    size_t begin,
-    size_t end
-) {
-    size_t len = end - begin;
-
-    Tensor result({1, len});
-
-    for (size_t i = 0; i < len; i++) {
-        result.at({0, i}) =
-            static_cast<float>(tokens[begin + i]);
-    }
-
-    return result;
-}
-
-
-// ============================================================
-// TEST 5: FULL FORWARD vs KV-CACHE
-//
-// This is the important one.
-//
-// We compare the actual logits, not only argmax.
-// ============================================================
-
-bool TestFullVsCache(
-    LanguageModel& model,
-    const std::vector<int>& tokens
-) {
-    std::cout << "\n";
-    PrintSeparator();
-    std::cout << "TEST 5: FULL FORWARD vs KV-CACHE\n";
-    PrintSeparator();
-
-    if (tokens.empty()) {
-        std::cout << "Token sequence is empty.\n";
-        Report("FULL vs KV-CACHE", false);
-        return false;
-    }
-
-    const float tolerance = 1e-5f;
-
-    // --------------------------------------------------------
-    // FULL FORWARD
-    // --------------------------------------------------------
-
-    std::vector<Tensor> full_logits;
-
-    for (size_t pos = 0; pos < tokens.size(); pos++) {
-
-        model.ResetCache();
-
-        auto input =
-            std::make_shared<Tensor>(MakeTokenTensor(tokens, 0, pos + 1));
-
-        auto output = model.forward(input);
-
-        size_t last_pos =
-            output->GetShape()[1] - 1;
-
-        Tensor logits({output->GetShape()[2]});
-
-        for (size_t v = 0; v < output->GetShape()[2]; v++) {
-            logits.at(v) =
-                output->at({0, last_pos, v});
-        }
-
-        full_logits.push_back(logits);
-    }
-
-    // --------------------------------------------------------
-    // KV CACHE FORWARD
-    // --------------------------------------------------------
-
-    model.ResetCache();
-
-    std::vector<Tensor> cache_logits;
-
-    for (size_t pos = 0; pos < tokens.size(); pos++) {
-
-        auto input = std::make_shared<Tensor>(Tensor({1, 1}));
-
-        input->at({0, 0}) =
-            static_cast<float>(tokens[pos]);
-
-        auto output = model.forward(input);
-
-        size_t last_pos =
-            output->GetShape()[1] - 1;
-
-        Tensor logits({output->GetShape()[2]});
-
-        for (size_t v = 0; v < output->GetShape()[2]; v++) {
-            logits.at(v) =
-                output->at({0, last_pos, v});
-        }
-
-        cache_logits.push_back(logits);
-    }
-
-    // --------------------------------------------------------
-    // Compare
-    // --------------------------------------------------------
-
-    bool passed = true;
-
-    float global_max_diff = 0.0f;
-    float global_mean_diff = 0.0f;
-
-    size_t worst_position = 0;
-
-    for (size_t pos = 0; pos < tokens.size(); pos++) {
-
-        float max_diff =
-            MaxDiff(full_logits[pos], cache_logits[pos]);
-
-        float mean_diff =
-            MeanDiff(full_logits[pos], cache_logits[pos]);
-
-        global_mean_diff += mean_diff;
-
-        if (max_diff > global_max_diff) {
-            global_max_diff = max_diff;
-            worst_position = pos;
-        }
-
-        bool ok = max_diff <= tolerance;
-
-        if (!ok) {
-            passed = false;
-        }
-
-        std::cout
-            << "Position "
-            << pos
-            << " | input="
-            << tokens[pos]
-            << " | max_diff="
-            << std::scientific
-            << max_diff
-            << " | mean_diff="
-            << mean_diff
-            << " | "
-            << (ok ? "OK" : "FAIL")
-            << std::defaultfloat
-            << "\n";
-    }
-
-    global_mean_diff /= static_cast<float>(tokens.size());
-
-    std::cout << "\n";
-    std::cout
-        << "Global max diff: "
-        << std::scientific
-        << global_max_diff
-        << "\n";
-
-    std::cout
-        << "Global mean diff: "
-        << global_mean_diff
-        << "\n";
-
-    std::cout
-        << "Worst position: "
-        << worst_position
-        << "\n";
-
-    std::cout << std::defaultfloat;
-
-    Report("FULL vs KV-CACHE", passed);
-
-    return passed;
-}
-
-
-// ============================================================
-// TEST 6: Several sequence lengths
-// ============================================================
-
-bool TestDifferentSequenceLengths(
-    LanguageModel& model,
-    const std::vector<int>& tokens
-) {
-    std::cout << "\n";
-    PrintSeparator();
-    std::cout << "TEST 6: Different sequence lengths\n";
-    PrintSeparator();
-
-    std::vector<size_t> lengths = {
-        1,
-        2,
-        3,
-        5,
-        8,
-        10,
-        15,
-        20
-    };
-
-    bool all_passed = true;
-
-    for (size_t len : lengths) {
-
-        if (len > tokens.size()) {
-            continue;
-        }
-
-        std::vector<int> current(
-            tokens.begin(),
-            tokens.begin() + len
-        );
-
-        std::cout
-            << "\nSequence length = "
-            << len
-            << "\n";
-
-        bool passed =
-            TestFullVsCache(model, current);
-
-        if (!passed) {
-            all_passed = false;
-        }
-    }
-
-    Report(
-        "FULL vs CACHE on different sequence lengths",
-        all_passed
-    );
-
-    return all_passed;
-}
-
-
-// ============================================================
-// TEST 7: Generation sanity
-// ============================================================
-
-bool TestGeneration(
-    LanguageModel& model,
-    size_t start_token
-) {
-    std::cout << "\n";
-    PrintSeparator();
-    std::cout << "TEST 7: Generation sanity\n";
-    PrintSeparator();
-
-    model.ResetCache();
-
-    std::vector<size_t> generated =
-        model.generate(
-            {start_token},
-            30,
-            1.0f,
-            0.0f,
-            -1
-        );
-
-    bool non_empty =
-        !generated.empty();
-
-    bool correct_start =
-        non_empty &&
-        generated[0] == start_token;
-
-    bool correct_length =
-        generated.size() <= 30;
-
-    std::cout
-        << "Generated size: "
-        << generated.size()
-        << "\n";
-
-    std::cout << "Tokens: ";
-
-    for (int token : generated) {
-        std::cout << token << " ";
-    }
-
-    std::cout << "\n";
-
-    bool passed =
-        non_empty &&
-        correct_start &&
-        correct_length;
-
-    Report("Generation sanity", passed);
-
-    return passed;
-}
-
-
-// ============================================================
-// TEST 8: Sampling sanity
-// ============================================================
-
-bool TestSampling() {
-    std::cout << "\n";
-    PrintSeparator();
-    std::cout << "TEST 8: Sampling\n";
-    PrintSeparator();
-
-    LanguageModel model(
-        4,
-        8,
-        1,
-        1,
-        16
-    );
-
-    Tensor probs({4});
-
-    probs.at(0) = 0.05f;
-    probs.at(1) = 0.10f;
-    probs.at(2) = 0.25f;
-    probs.at(3) = 0.60f;
-
-    // Greedy must always select token 3.
-    bool greedy_ok = true;
-
-    for (int i = 0; i < 100; i++) {
-        int token =
-            model.SampleGreedy(probs);
-
-        if (token != 3) {
-            greedy_ok = false;
-            break;
-        }
-    }
-
-    std::cout
-        << "Greedy always selects max probability: "
-        << (greedy_ok ? "YES" : "NO")
-        << "\n";
-
-    // Sampling should produce more than one token
-    // with this distribution.
-    bool sampled_multiple = false;
-
-    int first = model.Sample(probs);
-
-    for (int i = 0; i < 200; i++) {
-        int token =
-            model.Sample(probs);
-
-        if (token != first) {
-            sampled_multiple = true;
-            break;
-        }
-    }
-
-    std::cout
-        << "Sampling produces different tokens: "
-        << (sampled_multiple ? "YES" : "NO")
-        << "\n";
-
-    bool passed =
-        greedy_ok &&
-        sampled_multiple;
-
-    Report("Sampling sanity", passed);
-
-    return passed;
-}
-
 
 // ============================================================
 // MAIN
 // ============================================================
 
 int main() {
+    try {
+        std::cout << "========================================\n";
+        std::cout << " RANDOM WINDOW CUDA TRAIN/VALIDATION TEST\n";
+        std::cout << "========================================\n\n";
 
-    std::cout
-        << "\n"
-        << "============================================================\n"
-        << "              TRANSFORMER CORRECTNESS TESTS\n"
-        << "============================================================\n";
+        // ====================================================
+        // CUDA
+        // ====================================================
 
-    // --------------------------------------------------------
-    // Basic tests that don't require a trained model
-    // --------------------------------------------------------
+        int device_count = 0;
 
-    TestTensorBasic();
+        cudaError_t cuda_error =
+            cudaGetDeviceCount(&device_count);
 
-    TestRoPE();
+        if (cuda_error != cudaSuccess) {
+            throw std::runtime_error(
+                std::string(
+                    "cudaGetDeviceCount failed: "
+                ) +
+                cudaGetErrorString(cuda_error)
+            );
+        }
 
-    TestSoftmax();
+        if (device_count == 0) {
+            throw std::runtime_error(
+                "No CUDA devices found"
+            );
+        }
 
-    TestTopP();
+        cudaDeviceProp properties;
 
-    TestSampling();
+        cudaGetDeviceProperties(
+            &properties,
+            0
+        );
 
-    // --------------------------------------------------------
-    // Create model
-    // --------------------------------------------------------
+        std::cout
+            << "CUDA devices: "
+            << device_count
+            << '\n';
 
-    std::cout << "\n";
-    PrintSeparator();
-    std::cout << "Creating LanguageModel for integration tests\n";
-    PrintSeparator();
+        std::cout
+            << "GPU: "
+            << properties.name
+            << "\n\n";
 
-    const size_t vocab_size = 77;
-    const size_t embed_dim = 32;
-    const size_t num_blocks = 2;
-    const size_t num_heads = 4;
-    const size_t hidden_dim = 64;
+        // ====================================================
+        // LOAD TEXT
+        // ====================================================
 
-    LanguageModel model(
-        vocab_size,
-        embed_dim,
-        num_blocks,
-        num_heads,
-        hidden_dim
-    );
+        std::cout
+            << "========================================\n"
+            << "          LOADING TEXT\n"
+            << "========================================\n";
 
-    /*
-        IMPORTANT:
+        std::ifstream file(DATA_PATH);
 
-        These dimensions are only used for the correctness test.
+        if (!file) {
+            throw std::runtime_error(
+                "Failed to open text file: " +
+                DATA_PATH
+            );
+        }
 
-        If your actual test model uses different dimensions,
-        change the five constants above to the same values.
-    */
+        std::string text(
+            (std::istreambuf_iterator<char>(file)),
+            std::istreambuf_iterator<char>()
+        );
 
-    std::vector<int> tokens = {
-        7, 4, 11, 11, 14,
-        22, 14, 17, 11, 3,
-        14, 22, 14, 17, 11,
-        3, 14, 22, 14, 17
-    };
+        std::cout
+            << "Text size: "
+            << text.size()
+            << " characters\n\n";
 
-    std::cout << "Test tokens: ";
+        // ====================================================
+        // TOKENIZER
+        // ====================================================
 
-    for (int token : tokens) {
-        std::cout << token << " ";
-    }
+        std::cout
+            << "========================================\n"
+            << "           TOKENIZATION\n"
+            << "========================================\n";
 
-    std::cout << "\n";
+        BPETokenizer tokenizer;
 
-    // --------------------------------------------------------
-    // FULL vs CACHE
-    // --------------------------------------------------------
+        tokenizer.Load(TOKENIZER_PATH);
 
-    TestFullVsCache(model, tokens);
+        std::cout
+            << "Tokenizer loaded.\n";
 
-    // --------------------------------------------------------
-    // Different lengths
-    // --------------------------------------------------------
+        std::cout
+            << "Vocab size: "
+            << tokenizer.GetVocabSize()
+            << '\n';
 
-    TestDifferentSequenceLengths(model, tokens);
+        if (tokenizer.GetVocabSize() != VOCAB_SIZE) {
+            throw std::runtime_error(
+                "Tokenizer vocabulary size does not match model"
+            );
+        }
 
-    // --------------------------------------------------------
-    // Generation
-    // --------------------------------------------------------
+        std::vector<size_t> tokens =
+            tokenizer.Encode(text);
 
-    TestGeneration(model, tokens[0]);
+        std::cout
+            << "Tokens: "
+            << tokens.size()
+            << "\n\n";
 
-    // --------------------------------------------------------
-    // Summary
-    // --------------------------------------------------------
+        // ====================================================
+        // TRAIN / VALIDATION SPLIT
+        // ====================================================
 
-    std::cout << "\n";
-    std::cout
-        << "============================================================\n";
-    std::cout
-        << "                         SUMMARY\n";
-    std::cout
-        << "============================================================\n";
+        const size_t train_tokens =
+            static_cast<size_t>(
+                static_cast<double>(tokens.size())
+                * TRAIN_RATIO
+            );
 
-    size_t passed = 0;
-    size_t failed = 0;
+        const size_t validation_start =
+            train_tokens;
 
-    for (const auto& result : results) {
+        const size_t validation_end =
+            tokens.size();
 
-        if (result.passed) {
-            passed++;
-        } else {
-            failed++;
+        const size_t train_max_start =
+            train_tokens - CONTEXT - 1;
+
+        if (train_tokens <= CONTEXT + 1) {
+            throw std::runtime_error(
+                "Training dataset is too small"
+            );
+        }
+
+        if (validation_end <=
+            validation_start + CONTEXT + 1) {
+
+            throw std::runtime_error(
+                "Validation dataset is too small"
+            );
         }
 
         std::cout
-            << (result.passed ? "[PASS] " : "[FAIL] ")
-            << result.name
-            << "\n";
-    }
+            << "Dataset split:\n"
+            << "  Train tokens: "
+            << train_tokens
+            << '\n'
+            << "  Validation tokens: "
+            << validation_end - validation_start
+            << '\n'
+            << "  Train ratio: "
+            << TRAIN_RATIO
+            << "\n\n";
 
-    std::cout
-        << "\nPassed: "
-        << passed
-        << "\n";
+        // ====================================================
+        // MODEL
+        // ====================================================
 
-    std::cout
-        << "Failed: "
-        << failed
-        << "\n";
-
-    if (failed == 0) {
         std::cout
-            << "\nALL TESTS PASSED.\n";
-    } else {
+            << "========================================\n"
+            << "               MODEL\n"
+            << "========================================\n";
+
         std::cout
-            << "\nSOME TESTS FAILED.\n";
+            << "Vocabulary: "
+            << VOCAB_SIZE
+            << '\n';
+
+        std::cout
+            << "Embedding: "
+            << EMBED_DIM
+            << '\n';
+
+        std::cout
+            << "Blocks: "
+            << BLOCKS
+            << '\n';
+
+        std::cout
+            << "Heads: "
+            << HEADS
+            << '\n';
+
+        std::cout
+            << "Hidden: "
+            << HIDDEN
+            << '\n';
+
+        std::cout
+            << "Context: "
+            << CONTEXT
+            << '\n';
+
+        std::cout
+            << "Batch: "
+            << BATCH_SIZE
+            << '\n';
+
+        std::cout
+            << "Steps: "
+            << STEPS
+            << '\n';
+
+        std::cout
+            << "Learning rate: "
+            << LR
+            << "\n\n";
+
+        LanguageModel model(
+            VOCAB_SIZE,
+            EMBED_DIM,
+            BLOCKS,
+            HEADS,
+            HIDDEN,
+            Device::CUDA
+        );
+
+        model.SetUseKVCache(false);
+
+        CrossEntropyLoss loss;
+
+        // ====================================================
+        // RANDOM GENERATORS
+        // ====================================================
+
+        std::mt19937 generator(42);
+
+        std::uniform_int_distribution<size_t>
+            train_distribution(
+                0,
+                train_max_start
+            );
+
+        std::mt19937 validation_generator(12345);
+
+        // ====================================================
+        // TRAINING
+        // ====================================================
+
+        std::cout
+            << "========================================\n"
+            << "             TRAINING\n"
+            << "========================================\n\n";
+
+        double train_loss_sum = 0.0;
+
+        float initial_train_loss = -1.0f;
+        float final_train_loss = -1.0f;
+
+        for (size_t step = 0;
+             step < STEPS;
+             ++step) {
+
+            // ------------------------------------------------
+            // TRAINING BATCH
+            // ------------------------------------------------
+
+            std::vector<float> input_data(
+                BATCH_SIZE * CONTEXT
+            );
+
+            std::vector<float> target_data(
+                BATCH_SIZE * CONTEXT
+            );
+
+            for (size_t b = 0;
+                 b < BATCH_SIZE;
+                 ++b) {
+
+                size_t start =
+                    train_distribution(generator);
+
+                for (size_t i = 0;
+                     i < CONTEXT;
+                     ++i) {
+
+                    input_data[
+                        b * CONTEXT + i
+                    ] =
+                        static_cast<float>(
+                            tokens[start + i]
+                        );
+
+                    target_data[
+                        b * CONTEXT + i
+                    ] =
+                        static_cast<float>(
+                            tokens[start + i + 1]
+                        );
+                }
+            }
+
+            Tensor input =
+                MakeCUDATensor(
+                    input_data,
+                    BATCH_SIZE,
+                    CONTEXT
+                );
+
+            Tensor target =
+                MakeCUDATensor(
+                    target_data,
+                    BATCH_SIZE,
+                    CONTEXT
+                );
+
+            model.ClearGrad();
+
+            auto input_ptr =
+                std::make_shared<Tensor>(
+                    std::move(input)
+                );
+
+            auto logits =
+                model.forward(input_ptr);
+
+            Tensor current_loss =
+                loss.forward(
+                    *logits,
+                    target
+                );
+
+            float loss_value =
+                GetScalar(current_loss);
+
+            Tensor loss_grad =
+                loss.backward();
+
+            logits->backward(
+                loss_grad
+            );
+
+            model.UpdateAdamW(
+                LR,
+                0.9f,
+                0.999f,
+                1e-8f,
+                0.01f
+            );
+
+            model.ClearGrad();
+
+            // ------------------------------------------------
+            // STATISTICS
+            // ------------------------------------------------
+
+            if (step == 0) {
+                initial_train_loss =
+                    loss_value;
+            }
+
+            final_train_loss =
+                loss_value;
+
+            train_loss_sum += loss_value;
+
+            // ------------------------------------------------
+            // LOGGING
+            // ------------------------------------------------
+
+            if (step % 100 == 0 ||
+                step == STEPS - 1) {
+
+                double average_train_loss =
+                    train_loss_sum /
+                    static_cast<double>(
+                        step + 1
+                    );
+
+                std::cout
+                    << "Step "
+                    << std::setw(4)
+                    << step
+                    << " | Loss: "
+                    << std::fixed
+                    << std::setprecision(6)
+                    << loss_value
+                    << " | Avg: "
+                    << average_train_loss
+                    << '\n';
+            }
+
+            // ------------------------------------------------
+            // VALIDATION
+            // ------------------------------------------------
+
+            if (step == 0 ||
+                (step + 1) %
+                    VALIDATION_INTERVAL == 0 ||
+                step == STEPS - 1) {
+
+                float validation_loss =
+                    CalculateValidationLoss(
+                        model,
+                        loss,
+                        tokens,
+                        validation_start,
+                        validation_end,
+                        validation_generator
+                    );
+
+                std::cout
+                    << "           Validation loss: "
+                    << std::fixed
+                    << std::setprecision(6)
+                    << validation_loss
+                    << "\n";
+            }
+        }
+
+        // ====================================================
+        // RESULT
+        // ====================================================
+
+        double average_train_loss =
+            train_loss_sum /
+            static_cast<double>(STEPS);
+
+        std::cout
+            << "\n========================================\n"
+            << "               RESULT\n"
+            << "========================================\n";
+
+        std::cout
+            << "Initial train loss: "
+            << initial_train_loss
+            << '\n';
+
+        std::cout
+            << "Final train loss:   "
+            << final_train_loss
+            << '\n';
+
+        std::cout
+            << "Average train loss: "
+            << average_train_loss
+            << '\n';
+
+        std::cout
+            << "Loss change:        "
+            << final_train_loss
+               - initial_train_loss
+            << '\n';
+
+        if (final_train_loss <
+            initial_train_loss) {
+
+            std::cout
+                << "\n[OK] Training loss decreased.\n";
+
+        } else {
+
+            std::cout
+                << "\n[WARNING] Training loss did not decrease.\n";
+        }
+
+        std::cout
+            << "\n========================================\n"
+            << " TRAIN/VALIDATION TEST FINISHED\n"
+            << "========================================\n";
+
+        return 0;
     }
+    catch (const std::exception& e) {
 
-    std::cout
-        << "============================================================\n";
+        std::cerr
+            << "\n[ERROR] "
+            << e.what()
+            << '\n';
 
-    return failed == 0 ? 0 : 1;
+        return 1;
+    }
 }

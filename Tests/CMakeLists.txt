@@ -632,9 +632,7 @@ add_executable(tests
     ../../Engine/Tensor/backend.cpp
     ../../Engine/Tensor/cpu_backend.cpp
     ../../Engine/Tensor/matmul.cpp
-
-    ../../Engine/Autograd/rms_norm_op.cpp
-    ../../Engine/Autograd/embedding_op.cpp
+    ../../Engine/Tensor/cuda_backend.cu
 
     # Autograd
     ../../Engine/Autograd/add_op.cpp
@@ -651,6 +649,7 @@ add_executable(tests
     ../../Engine/Autograd/transpose_op.cpp
     ../../Engine/Autograd/rope_op.cpp
     ../../Engine/Autograd/softmax_op.cpp
+    ../../Engine/Autograd/reshape_op.cpp
 
     # Attention
     ../../Engine/Attention/attention.cpp
@@ -662,6 +661,11 @@ add_executable(tests
     ../../Engine/Layers/feed_forward.cpp
     ../../Engine/Layers/embedding_layer.cpp
     ../../Engine/Layers/language_model.cpp
+    ../../Engine/Layers/ce_loss.cpp
+
+
+    ../../Engine/Autograd/rms_norm_op.cpp
+    ../../Engine/Autograd/embedding_op.cpp
 
     # Normalization
     ../../Engine/Normalization/rms_norm.cpp
