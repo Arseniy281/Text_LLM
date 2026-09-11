@@ -62,7 +62,8 @@ std::string ReadFile(const std::string& path) {
 std::vector<float> CopyLastLogitsToCPU(
     const std::shared_ptr<Tensor>& logits
 ) {
-    const auto& shape = logits->GetShape();
+    const auto& shape =
+        logits->GetShape();
 
     if (shape.size() != 3) {
         throw std::runtime_error(
@@ -111,27 +112,33 @@ std::vector<float> CopyLastLogitsToCPU(
 std::shared_ptr<Tensor> CreateInput(
     const std::vector<size_t>& tokens
 ) {
-    auto cpu = std::make_shared<Tensor>(
-        std::vector<size_t>{
-            1,
-            tokens.size()
-        }
-    );
+    auto cpu =
+        std::make_shared<Tensor>(
+            std::vector<size_t>{
+                1,
+                tokens.size()
+            }
+        );
 
-    for (size_t i = 0; i < tokens.size(); ++i) {
+    for (size_t i = 0;
+         i < tokens.size();
+         ++i) {
 
         cpu->at({0, i}) =
-            static_cast<float>(tokens[i]);
+            static_cast<float>(
+                tokens[i]
+            );
     }
 
-    auto gpu = std::make_shared<Tensor>(
-        std::vector<size_t>{
-            1,
-            tokens.size()
-        },
-        0.0f,
-        Device::CUDA
-    );
+    auto gpu =
+        std::make_shared<Tensor>(
+            std::vector<size_t>{
+                1,
+                tokens.size()
+            },
+            0.0f,
+            Device::CUDA
+        );
 
     cpu->CopyToCUDA(*gpu);
 
@@ -147,7 +154,9 @@ size_t ArgMax(
 ) {
     size_t best = 0;
 
-    for (size_t i = 1; i < values.size(); ++i) {
+    for (size_t i = 1;
+         i < values.size();
+         ++i) {
 
         if (values[i] > values[best]) {
             best = i;
@@ -167,9 +176,17 @@ size_t GetRank(
     const std::vector<float>& logits,
     size_t target
 ) {
+    if (target >= logits.size()) {
+        throw std::runtime_error(
+            "Target token is outside vocabulary"
+        );
+    }
+
     size_t rank = 1;
 
-    for (size_t i = 0; i < logits.size(); ++i) {
+    for (size_t i = 0;
+         i < logits.size();
+         ++i) {
 
         if (logits[i] > logits[target]) {
             ++rank;
@@ -182,13 +199,19 @@ size_t GetRank(
 // ============================================================
 // Cross entropy for one target
 //
-// log_softmax(logits)[target]
+// CE = log(sum(exp(logits))) - logits[target]
 // ============================================================
 
 float CrossEntropy(
     const std::vector<float>& logits,
     size_t target
 ) {
+    if (target >= logits.size()) {
+        throw std::runtime_error(
+            "Target token is outside vocabulary"
+        );
+    }
+
     float max_logit =
         *std::max_element(
             logits.begin(),
@@ -241,7 +264,9 @@ int main() {
         int device_count = 0;
 
         cudaError_t error =
-            cudaGetDeviceCount(&device_count);
+            cudaGetDeviceCount(
+                &device_count
+            );
 
         if (error != cudaSuccess ||
             device_count == 0) {
@@ -380,33 +405,42 @@ int main() {
         }
 
         // ----------------------------------------------------
-        // Feed prompt token-by-token
+        // Process prompt
         // ----------------------------------------------------
 
         std::cout
             << "Processing prompt...\n";
+
+        std::vector<float> current_logits;
 
         for (size_t i = 0;
              i < prompt.size();
              ++i) {
 
             auto input =
-                CreateInput({prompt[i]});
+                CreateInput({
+                    prompt[i]
+                });
 
             auto output =
                 model.forward(input);
 
             cudaDeviceSynchronize();
 
-            // Нам нужен только последний logits
-            // после последнего prompt token.
+            if (i + 1 == prompt.size()) {
+
+                current_logits =
+                    CopyLastLogitsToCPU(
+                        output
+                    );
+            }
         }
 
         std::cout
             << "[OK] Prompt processed.\n\n";
 
         // ====================================================
-        // TEST
+        // Teacher-forced validation
         // ====================================================
 
         size_t top1_hits = 0;
@@ -421,68 +455,214 @@ int main() {
              ++step) {
 
             // ------------------------------------------------
-            // Получаем logits для текущего контекста
+            // Real next token
             //
-            // ВАЖНО:
-            //
-            // Сейчас после prompt или после предыдущего
-            // реального токена cache содержит правильный
-            // контекст.
-            //
-            // Но logits этого контекста нужно получить
-            // именно на последнем forward.
-            //
-            // Поэтому первый шаг берём из prompt_forward,
-            // а дальше logits получаем после подачи
-            // предыдущего токена.
+            // We predict this token using the current
+            // real context.
             // ------------------------------------------------
 
-            // Здесь будет реализована ниже.
+            size_t target =
+                tokens[
+                    start +
+                    PROMPT_SIZE +
+                    step
+                ];
+
+            // ------------------------------------------------
+            // Prediction
+            // ------------------------------------------------
+
+            size_t prediction =
+                ArgMax(
+                    current_logits
+                );
+
+            size_t rank =
+                GetRank(
+                    current_logits,
+                    target
+                );
+
+            float loss =
+                CrossEntropy(
+                    current_logits,
+                    target
+                );
+
+            // ------------------------------------------------
+            // Metrics
+            // ------------------------------------------------
+
+            if (prediction == target) {
+                ++top1_hits;
+            }
+
+            if (rank <= 5) {
+                ++top5_hits;
+            }
+
+            if (rank <= 10) {
+                ++top10_hits;
+            }
+
+            total_rank +=
+                static_cast<double>(
+                    rank
+                );
+
+            total_loss +=
+                static_cast<double>(
+                    loss
+                );
+
+            // ------------------------------------------------
+            // First 10 steps
+            // ------------------------------------------------
+
+            if (step < 10) {
+
+                std::cout
+                    << "Step "
+                    << step
+                    << ":\n";
+
+                std::cout
+                    << "  Expected: "
+                    << target
+                    << "\n";
+
+                std::cout
+                    << "  Greedy:   "
+                    << prediction
+                    << "\n";
+
+                std::cout
+                    << "  Rank:     "
+                    << rank
+                    << "\n";
+
+                std::cout
+                    << "  Loss:     "
+                    << loss
+                    << "\n";
+
+                if (prediction == target) {
+
+                    std::cout
+                        << "  [TOP-1]\n";
+
+                } else if (rank <= 5) {
+
+                    std::cout
+                        << "  [TOP-5]\n";
+
+                } else if (rank <= 10) {
+
+                    std::cout
+                        << "  [TOP-10]\n";
+
+                } else {
+
+                    std::cout
+                        << "  [MISS]\n";
+                }
+
+                std::cout
+                    << "\n";
+            }
+
+            // ------------------------------------------------
+            // Teacher forcing
+            //
+            // IMPORTANT:
+            //
+            // We feed the REAL target token, not the
+            // model prediction.
+            // ------------------------------------------------
+
+            auto input =
+                CreateInput({
+                    target
+                });
+
+            auto output =
+                model.forward(input);
+
+            cudaDeviceSynchronize();
+
+            current_logits =
+                CopyLastLogitsToCPU(
+                    output
+                );
         }
 
-        // ----------------------------------------------------
+        // ====================================================
         // Result
-        // ----------------------------------------------------
+        // ====================================================
+
+        double average_loss =
+            total_loss /
+            static_cast<double>(
+                TEST_STEPS
+            );
+
+        double average_rank =
+            total_rank /
+            static_cast<double>(
+                TEST_STEPS
+            );
+
+        double perplexity =
+            std::exp(
+                average_loss
+            );
 
         std::cout
-            << "\n========================================\n";
-
+            << "\n";
+        std::cout
+            << "========================================\n";
         std::cout
             << "RESULT\n";
-
         std::cout
             << "========================================\n";
 
         std::cout
             << "Top-1 accuracy:  "
             << 100.0 *
-                static_cast<double>(top1_hits) /
-                TEST_STEPS
+                static_cast<double>(
+                    top1_hits
+                ) /
+                static_cast<double>(
+                    TEST_STEPS
+                )
             << "%\n";
 
         std::cout
             << "Top-5 accuracy:  "
             << 100.0 *
-                static_cast<double>(top5_hits) /
-                TEST_STEPS
+                static_cast<double>(
+                    top5_hits
+                ) /
+                static_cast<double>(
+                    TEST_STEPS
+                )
             << "%\n";
 
         std::cout
             << "Top-10 accuracy: "
             << 100.0 *
-                static_cast<double>(top10_hits) /
-                TEST_STEPS
+                static_cast<double>(
+                    top10_hits
+                ) /
+                static_cast<double>(
+                    TEST_STEPS
+                )
             << "%\n";
 
         std::cout
             << "Average rank:    "
-            << total_rank /
-                static_cast<double>(TEST_STEPS)
+            << average_rank
             << "\n";
-
-        double average_loss =
-            total_loss /
-            static_cast<double>(TEST_STEPS);
 
         std::cout
             << "Cross entropy:   "
@@ -491,11 +671,15 @@ int main() {
 
         std::cout
             << "Perplexity:      "
-            << std::exp(average_loss)
+            << perplexity
             << "\n";
 
         std::cout
             << "========================================\n";
+
+        // ----------------------------------------------------
+        // Cleanup
+        // ----------------------------------------------------
 
         model.SetUseKVCache(false);
         model.ResetCache();
