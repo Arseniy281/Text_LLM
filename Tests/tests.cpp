@@ -1,5 +1,4 @@
 #include "../Engine/Layers/language_model.h"
-#include "../Engine/Layers/ce_loss.h"
 #include "../Engine/Tokenizer/bpe_tokenizer.h"
 #include "../Engine/Tensor/tensor.h"
 
@@ -10,7 +9,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <random>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -22,42 +21,23 @@
 const std::string TOKENIZER_PATH =
     "../Models/MargaritaTokenizer";
 
+const std::string MODEL_PATH =
+    "../Models/MargaritaCUDA/step_20000";
+
 const std::string CORPUS_PATH =
     "../Data/master_and_margarita.txt";
 
 const size_t VOCAB_SIZE = 1000;
-
 const size_t EMBED_DIM = 128;
 const size_t BLOCKS = 4;
 const size_t HEADS = 4;
 const size_t HIDDEN = 512;
 
-const size_t CONTEXT = 128;
-const size_t BATCH_SIZE = 8;
+const size_t PROMPT_SIZE = 32;
+const size_t TEST_STEPS = 50;
 
-const size_t STEPS = 2000;
-
-// ============================================================
-// Learning rate
-// ============================================================
-
-const float MAX_LR = 0.001f;
-const float MIN_LR = 0.0001f;
-
-const size_t WARMUP_STEPS = 200;
-
-// ============================================================
-// Validation
-// ============================================================
-
-const size_t VALIDATION_EVERY = 100;
-const size_t VALIDATION_BATCHES = 20;
-
-// ============================================================
-// Random
-// ============================================================
-
-const unsigned int SEED = 42;
+// Та же позиция, что и в предыдущем тесте.
+const size_t VALIDATION_OFFSET = 14136;
 
 // ============================================================
 // Read file
@@ -81,242 +61,91 @@ std::string ReadFile(
 }
 
 // ============================================================
-// Learning rate schedule
+// Create CUDA input
 //
-// Warmup:
-//     0 -> MAX_LR
-//
-// Cosine decay:
-//     MAX_LR -> MIN_LR
+// Shape:
+// [1, seq]
 // ============================================================
 
-float GetLearningRate(
-    size_t step
+std::shared_ptr<Tensor> CreateInput(
+    const std::vector<size_t>& tokens
 ) {
-    if (step < WARMUP_STEPS) {
-
-        return MAX_LR *
-            static_cast<float>(step + 1) /
-            static_cast<float>(WARMUP_STEPS);
-    }
-
-    float progress =
-        static_cast<float>(
-            step - WARMUP_STEPS
-        ) /
-        static_cast<float>(
-            STEPS - WARMUP_STEPS
+    auto cpu =
+        std::make_shared<Tensor>(
+            std::vector<size_t>{
+                1,
+                tokens.size()
+            }
         );
 
-    progress =
-        std::clamp(
-            progress,
+    for (size_t i = 0;
+         i < tokens.size();
+         ++i) {
+
+        cpu->at({0, i}) =
+            static_cast<float>(
+                tokens[i]
+            );
+    }
+
+    auto gpu =
+        std::make_shared<Tensor>(
+            std::vector<size_t>{
+                1,
+                tokens.size()
+            },
             0.0f,
-            1.0f
+            Device::CUDA
         );
 
-    return MIN_LR +
-        0.5f *
-        (MAX_LR - MIN_LR) *
-        (1.0f +
-            std::cos(
-                static_cast<float>(M_PI) *
-                progress
-            ));
-}
-
-// ============================================================
-// Create CUDA tensor from token IDs
-//
-// Shape:
-// [BATCH, CONTEXT]
-// ============================================================
-
-Tensor CreateInput(
-    const std::vector<size_t>& tokens
-) {
-    if (tokens.size() !=
-        BATCH_SIZE * CONTEXT) {
-
-        throw std::runtime_error(
-            "Invalid input token count"
-        );
-    }
-
-    Tensor cpu(
-        {BATCH_SIZE, CONTEXT},
-        0.0f
-    );
-
-    for (size_t i = 0;
-         i < tokens.size();
-         ++i) {
-
-        size_t b =
-            i / CONTEXT;
-
-        size_t t =
-            i % CONTEXT;
-
-        cpu.at({b, t}) =
-            static_cast<float>(
-                tokens[i]
-            );
-    }
-
-    Tensor gpu(
-        {BATCH_SIZE, CONTEXT},
-        0.0f,
-        Device::CUDA
-    );
-
-    cpu.CopyToCUDA(gpu);
+    cpu->CopyToCUDA(*gpu);
 
     return gpu;
 }
 
 // ============================================================
-// Create target tensor
-//
-// Shape:
-// [BATCH, CONTEXT]
+// CUDA logits -> CPU
 // ============================================================
 
-Tensor CreateTarget(
-    const std::vector<size_t>& tokens
+std::vector<float> CopyLastLogitsToCPU(
+    const std::shared_ptr<Tensor>& logits
 ) {
-    if (tokens.size() !=
-        BATCH_SIZE * CONTEXT) {
+    const auto& shape =
+        logits->GetShape();
 
+    if (shape.size() != 3) {
         throw std::runtime_error(
-            "Invalid target token count"
+            "Expected logits rank 3"
         );
     }
 
-    Tensor cpu(
-        {BATCH_SIZE, CONTEXT},
-        0.0f
-    );
-
-    for (size_t i = 0;
-         i < tokens.size();
-         ++i) {
-
-        size_t b =
-            i / CONTEXT;
-
-        size_t t =
-            i % CONTEXT;
-
-        cpu.at({b, t}) =
-            static_cast<float>(
-                tokens[i]
-            );
-    }
-
-    Tensor gpu(
-        {BATCH_SIZE, CONTEXT},
-        0.0f,
-        Device::CUDA
-    );
-
-    cpu.CopyToCUDA(gpu);
-
-    return gpu;
-}
-
-// ============================================================
-// Create random batch
-//
-// Each sample:
-// input  = tokens[start ... start + CONTEXT - 1]
-// target = tokens[start + 1 ... start + CONTEXT]
-// ============================================================
-
-void CreateRandomBatch(
-    const std::vector<size_t>& tokens,
-    size_t begin,
-    size_t end,
-    std::mt19937& rng,
-    Tensor& input,
-    Tensor& target
-) {
-    if (end <= begin) {
+    if (shape[0] != 1) {
         throw std::runtime_error(
-            "Invalid token range"
+            "Expected batch size 1"
         );
     }
 
-    if (end - begin <= CONTEXT) {
+    size_t seq_len = shape[1];
+    size_t vocab_size = shape[2];
+
+    if (vocab_size != VOCAB_SIZE) {
         throw std::runtime_error(
-            "Token range is too small"
+            "Unexpected vocabulary size"
         );
     }
 
-    std::uniform_int_distribution<size_t> dist(
-        begin,
-        end - CONTEXT - 1
+    std::vector<float> result(
+        vocab_size
     );
 
-    std::vector<size_t> input_tokens;
-    std::vector<size_t> target_tokens;
-
-    input_tokens.reserve(
-        BATCH_SIZE * CONTEXT
-    );
-
-    target_tokens.reserve(
-        BATCH_SIZE * CONTEXT
-    );
-
-    for (size_t b = 0;
-         b < BATCH_SIZE;
-         ++b) {
-
-        size_t start =
-            dist(rng);
-
-        for (size_t i = 0;
-             i < CONTEXT;
-             ++i) {
-
-            input_tokens.push_back(
-                tokens[start + i]
-            );
-
-            target_tokens.push_back(
-                tokens[start + i + 1]
-            );
-        }
-    }
-
-    input =
-        CreateInput(input_tokens);
-
-    target =
-        CreateTarget(target_tokens);
-}
-
-// ============================================================
-// Get scalar CUDA tensor
-// ============================================================
-
-float GetScalar(
-    const Tensor& tensor
-) {
-    if (tensor.GetSize() != 1) {
-        throw std::runtime_error(
-            "Expected scalar tensor"
-        );
-    }
-
-    float value = 0.0f;
+    size_t offset =
+        (seq_len - 1) * vocab_size;
 
     cudaError_t error =
         cudaMemcpy(
-            &value,
-            tensor.Data(),
-            sizeof(float),
+            result.data(),
+            logits->Data() + offset,
+            vocab_size * sizeof(float),
             cudaMemcpyDeviceToHost
         );
 
@@ -329,75 +158,102 @@ float GetScalar(
         );
     }
 
-    return value;
+    return result;
 }
 
 // ============================================================
-// Calculate validation loss
-//
-// No backward.
-// No optimizer update.
+// ArgMax
 // ============================================================
 
-float EvaluateValidation(
-    LanguageModel& model,
-    CrossEntropyLoss& loss,
-    const std::vector<size_t>& tokens,
-    size_t validation_start,
-    size_t validation_end,
-    std::mt19937& rng
+size_t ArgMax(
+    const std::vector<float>& values
 ) {
-    double total_loss = 0.0;
+    size_t best = 0;
 
-    for (size_t batch = 0;
-         batch < VALIDATION_BATCHES;
-         ++batch) {
+    for (size_t i = 1;
+         i < values.size();
+         ++i) {
 
-        Tensor input;
-        Tensor target;
+        if (values[i] > values[best]) {
+            best = i;
+        }
+    }
 
-        CreateRandomBatch(
-            tokens,
-            validation_start,
-            validation_end,
-            rng,
-            input,
-            target
+    return best;
+}
+
+// ============================================================
+// Softmax
+//
+// Делается на CPU только для анализа.
+// ============================================================
+
+std::vector<float> Softmax(
+    const std::vector<float>& logits
+) {
+    std::vector<float> probs(
+        logits.size()
+    );
+
+    float max_logit =
+        *std::max_element(
+            logits.begin(),
+            logits.end()
         );
 
-        auto input_ptr =
-            std::make_shared<Tensor>(
-                std::move(input)
+    double sum = 0.0;
+
+    for (size_t i = 0;
+         i < logits.size();
+         ++i) {
+
+        probs[i] =
+            std::exp(
+                logits[i] - max_logit
             );
 
-        auto logits =
-            model.forward(
-                input_ptr
-            );
+        sum += probs[i];
+    }
 
-        Tensor current_loss =
-            loss.forward(
-                *logits,
-                target
-            );
+    for (size_t i = 0;
+         i < probs.size();
+         ++i) {
 
-        float loss_value =
-            GetScalar(
-                current_loss
-            );
-
-        total_loss +=
-            static_cast<double>(
-                loss_value
+        probs[i] =
+            static_cast<float>(
+                probs[i] / sum
             );
     }
 
-    return static_cast<float>(
-        total_loss /
-        static_cast<double>(
-            VALIDATION_BATCHES
-        )
-    );
+    return probs;
+}
+
+// ============================================================
+// Rank настоящего токена
+//
+// Rank 1 = лучший токен.
+// Rank 2 = второй лучший и т.д.
+// ============================================================
+
+size_t GetRank(
+    const std::vector<float>& logits,
+    size_t target
+) {
+    float target_value =
+        logits[target];
+
+    size_t rank = 1;
+
+    for (size_t i = 0;
+         i < logits.size();
+         ++i) {
+
+        if (logits[i] > target_value) {
+            ++rank;
+        }
+    }
+
+    return rank;
 }
 
 // ============================================================
@@ -411,7 +267,7 @@ int main() {
         std::cout
             << "========================================\n";
         std::cout
-            << "LR SCHEDULE TRAINING TEST\n";
+            << "TEACHER-FORCED TOKEN RANK TEST\n";
         std::cout
             << "========================================\n\n";
 
@@ -447,110 +303,6 @@ int main() {
             << "\n\n";
 
         // ----------------------------------------------------
-        // Configuration
-        // ----------------------------------------------------
-
-        std::cout
-            << "Vocabulary: "
-            << VOCAB_SIZE
-            << "\n";
-
-        std::cout
-            << "Embedding: "
-            << EMBED_DIM
-            << "\n";
-
-        std::cout
-            << "Blocks: "
-            << BLOCKS
-            << "\n";
-
-        std::cout
-            << "Heads: "
-            << HEADS
-            << "\n";
-
-        std::cout
-            << "Hidden: "
-            << HIDDEN
-            << "\n";
-
-        std::cout
-            << "Context: "
-            << CONTEXT
-            << "\n";
-
-        std::cout
-            << "Batch: "
-            << BATCH_SIZE
-            << "\n";
-
-        std::cout
-            << "Steps: "
-            << STEPS
-            << "\n";
-
-        std::cout
-            << "Max LR: "
-            << MAX_LR
-            << "\n";
-
-        std::cout
-            << "Min LR: "
-            << MIN_LR
-            << "\n";
-
-        std::cout
-            << "Warmup: "
-            << WARMUP_STEPS
-            << "\n";
-
-        std::cout
-            << "\n";
-
-        // ----------------------------------------------------
-        // Print LR schedule
-        // ----------------------------------------------------
-
-        std::cout
-            << "Learning rate schedule:\n";
-
-        std::cout
-            << "  step 0:    "
-            << GetLearningRate(0)
-            << "\n";
-
-        std::cout
-            << "  step 100:  "
-            << GetLearningRate(100)
-            << "\n";
-
-        std::cout
-            << "  step 200:  "
-            << GetLearningRate(200)
-            << "\n";
-
-        std::cout
-            << "  step 500:  "
-            << GetLearningRate(500)
-            << "\n";
-
-        std::cout
-            << "  step 1000: "
-            << GetLearningRate(1000)
-            << "\n";
-
-        std::cout
-            << "  step 1500: "
-            << GetLearningRate(1500)
-            << "\n";
-
-        std::cout
-            << "  step 1999: "
-            << GetLearningRate(1999)
-            << "\n\n";
-
-        // ----------------------------------------------------
         // Tokenizer
         // ----------------------------------------------------
 
@@ -568,14 +320,10 @@ int main() {
         // ----------------------------------------------------
 
         std::string corpus =
-            ReadFile(
-                CORPUS_PATH
-            );
+            ReadFile(CORPUS_PATH);
 
         std::vector<size_t> tokens =
-            tokenizer.Encode(
-                corpus
-            );
+            tokenizer.Encode(corpus);
 
         std::cout
             << "[OK] Corpus encoded.\n";
@@ -586,7 +334,7 @@ int main() {
             << "\n\n";
 
         // ----------------------------------------------------
-        // Train / validation split
+        // Validation position
         // ----------------------------------------------------
 
         size_t train_size =
@@ -597,34 +345,34 @@ int main() {
         size_t validation_start =
             train_size;
 
-        size_t validation_end =
-            tokens.size();
+        size_t start =
+            validation_start +
+            VALIDATION_OFFSET;
+
+        if (start +
+                PROMPT_SIZE +
+                TEST_STEPS >=
+            tokens.size()) {
+
+            throw std::runtime_error(
+                "Invalid test position"
+            );
+        }
 
         std::cout
-            << "Train tokens: "
-            << train_size
+            << "Validation token position: "
+            << start
             << "\n";
 
         std::cout
-            << "Validation tokens: "
-            << validation_end -
-               validation_start
+            << "Prompt size: "
+            << PROMPT_SIZE
+            << "\n";
+
+        std::cout
+            << "Test steps: "
+            << TEST_STEPS
             << "\n\n";
-
-        // ----------------------------------------------------
-        // Random generators
-        //
-        // Separate generators are used so that validation
-        // sampling does not affect training randomness.
-        // ----------------------------------------------------
-
-        std::mt19937 train_rng(
-            SEED
-        );
-
-        std::mt19937 validation_rng(
-            SEED
-        );
 
         // ----------------------------------------------------
         // Model
@@ -642,237 +390,358 @@ int main() {
         std::cout
             << "[OK] Model created.\n";
 
-        // ----------------------------------------------------
-        // Loss
-        // ----------------------------------------------------
-
-        CrossEntropyLoss loss;
-
-        std::cout
-            << "[OK] Loss created.\n\n";
-
-        // ----------------------------------------------------
-        // Initial validation
-        // ----------------------------------------------------
-
-        std::cout
-            << "Initial validation...\n";
-
-        float initial_val_loss =
-            EvaluateValidation(
-                model,
-                loss,
-                tokens,
-                validation_start,
-                validation_end,
-                validation_rng
-            );
-
-        std::cout
-            << "Initial validation loss: "
-            << initial_val_loss
-            << "\n\n";
-
-        // Reset validation RNG so that every validation
-        // evaluation uses the same sequence of windows.
-
-        validation_rng.seed(
-            SEED
+        model.LoadModel(
+            MODEL_PATH
         );
 
-        // ----------------------------------------------------
-        // Training statistics
-        // ----------------------------------------------------
-
-        double total_train_loss = 0.0;
-
-        size_t train_loss_count = 0;
-
-        float best_val_loss =
-            initial_val_loss;
-
-        size_t best_step = 0;
-
-        float final_train_loss = 0.0f;
-        float final_val_loss = 0.0f;
+        std::cout
+            << "[OK] Model loaded.\n";
 
         // ----------------------------------------------------
-        // Training
+        // KV cache
+        //
+        // Используем тот же режим, что и при генерации.
         // ----------------------------------------------------
+
+        model.SetUseKVCache(true);
+        model.ResetCache();
+
+        // ====================================================
+        // Feed prompt
+        // ====================================================
 
         std::cout
-            << "========================================\n";
+            << "\nFeeding prompt...\n";
+
+        for (size_t i = 0;
+             i < PROMPT_SIZE;
+             ++i) {
+
+            size_t token =
+                tokens[start + i];
+
+            auto input =
+                CreateInput({
+                    token
+                });
+
+            model.forward(input);
+
+            cudaDeviceSynchronize();
+        }
+
         std::cout
-            << "TRAINING\n";
+            << "[OK] Prompt processed.\n\n";
+
+        // ====================================================
+        // Statistics
+        // ====================================================
+
+        size_t top1 = 0;
+        size_t top5 = 0;
+        size_t top10 = 0;
+
+        double rank_sum = 0.0;
+        double cross_entropy = 0.0;
+
+        // ====================================================
+        // Header
+        // ====================================================
+
         std::cout
-            << "========================================\n\n";
+            << "==============================================================\n";
+
+        std::cout
+            << "Step | Real | Pred | Rank | Top-1 | Top-5 | Top-10"
+            << " | P(real) | P(pred)\n";
+
+        std::cout
+            << "--------------------------------------------------------------\n";
+
+        // ====================================================
+        // Teacher-forced test
+        // ====================================================
 
         for (size_t step = 0;
-             step < STEPS;
+             step < TEST_STEPS;
              ++step) {
 
             // ------------------------------------------------
-            // Learning rate
+            // Real next token
             // ------------------------------------------------
 
-            float lr =
-                GetLearningRate(
+            size_t real_token =
+                tokens[
+                    start +
+                    PROMPT_SIZE +
                     step
+                ];
+
+            // ------------------------------------------------
+            // IMPORTANT:
+            //
+            // We need logits produced from the CURRENT
+            // correct context BEFORE feeding real_token.
+            //
+            // Therefore we have to get the output from
+            // the previous forward.
+            //
+            // To keep the logic clean, for the first step
+            // we need to process the last prompt token again
+            // and use its logits.
+            // ------------------------------------------------
+
+            std::vector<float> logits;
+
+            if (step == 0) {
+
+                // The prompt loop above already processed
+                // the last prompt token, but did not save logits.
+                // Rebuild the model state from scratch so that
+                // we can obtain the exact logits.
+
+                model.SetUseKVCache(false);
+
+                model.ResetCache();
+
+                auto prompt_input =
+                    CreateInput(
+                        std::vector<size_t>(
+                            tokens.begin() + start,
+                            tokens.begin() +
+                            start +
+                            PROMPT_SIZE
+                        )
+                    );
+
+                auto output =
+                    model.forward(
+                        prompt_input
+                    );
+
+                cudaDeviceSynchronize();
+
+                logits =
+                    CopyLastLogitsToCPU(
+                        output
+                    );
+
+                model.SetUseKVCache(true);
+                model.ResetCache();
+
+                // Re-feed prompt token-by-token
+                // to initialize KV cache again.
+
+                for (size_t i = 0;
+                     i < PROMPT_SIZE;
+                     ++i) {
+
+                    auto input =
+                        CreateInput({
+                            tokens[start + i]
+                        });
+
+                    model.forward(input);
+
+                    cudaDeviceSynchronize();
+                }
+            }
+            else {
+
+                // For subsequent steps logits were saved
+                // after feeding the previous real token.
+                //
+                // They will be stored below.
+            }
+
+            // ------------------------------------------------
+            // For step > 0, logits are already available
+            // from previous iteration.
+            // ------------------------------------------------
+
+            static std::vector<float> saved_logits;
+
+            if (step == 0) {
+                saved_logits = logits;
+            }
+
+            logits = saved_logits;
+
+            // ------------------------------------------------
+            // Prediction
+            // ------------------------------------------------
+
+            size_t prediction =
+                ArgMax(logits);
+
+            // ------------------------------------------------
+            // Rank
+            // ------------------------------------------------
+
+            size_t rank =
+                GetRank(
+                    logits,
+                    real_token
                 );
 
             // ------------------------------------------------
-            // Random batch
+            // Probability
             // ------------------------------------------------
 
-            Tensor input;
-            Tensor target;
+            std::vector<float> probs =
+                Softmax(logits);
 
-            CreateRandomBatch(
-                tokens,
-                0,
-                train_size,
-                train_rng,
-                input,
-                target
-            );
+            float real_probability =
+                probs[real_token];
 
-            // ------------------------------------------------
-            // Forward
-            // ------------------------------------------------
-
-            model.ClearGrad();
-
-            auto input_ptr =
-                std::make_shared<Tensor>(
-                    std::move(input)
-                );
-
-            auto logits =
-                model.forward(
-                    input_ptr
-                );
-
-            Tensor current_loss =
-                loss.forward(
-                    *logits,
-                    target
-                );
-
-            float loss_value =
-                GetScalar(
-                    current_loss
-                );
-
-            // ------------------------------------------------
-            // Backward
-            // ------------------------------------------------
-
-            Tensor loss_grad =
-                loss.backward();
-
-            logits->backward(
-                loss_grad
-            );
-
-            // ------------------------------------------------
-            // AdamW
-            // ------------------------------------------------
-
-            model.UpdateAdamW(
-                lr
-            );
+            float prediction_probability =
+                probs[prediction];
 
             // ------------------------------------------------
             // Statistics
             // ------------------------------------------------
 
-            total_train_loss +=
-                static_cast<double>(
-                    loss_value
-                );
-
-            ++train_loss_count;
-
-            final_train_loss =
-                loss_value;
-
-            // ------------------------------------------------
-            // Validation
-            // ------------------------------------------------
-
-            if (step % VALIDATION_EVERY == 0 ||
-                step + 1 == STEPS) {
-
-                cudaDeviceSynchronize();
-
-                validation_rng.seed(
-                    SEED
-                );
-
-                float val_loss =
-                    EvaluateValidation(
-                        model,
-                        loss,
-                        tokens,
-                        validation_start,
-                        validation_end,
-                        validation_rng
-                    );
-
-                final_val_loss =
-                    val_loss;
-
-                double average_train_loss =
-                    total_train_loss /
-                    static_cast<double>(
-                        train_loss_count
-                    );
-
-                std::cout
-                    << "Step "
-                    << std::setw(4)
-                    << step
-                    << " | LR: "
-                    << std::fixed
-                    << std::setprecision(7)
-                    << lr
-                    << " | Train: "
-                    << std::setprecision(5)
-                    << loss_value
-                    << " | Avg: "
-                    << average_train_loss
-                    << " | Val: "
-                    << val_loss;
-
-                if (val_loss < best_val_loss) {
-
-                    best_val_loss =
-                        val_loss;
-
-                    best_step =
-                        step;
-
-                    std::cout
-                        << " | BEST";
-                }
-
-                std::cout
-                    << "\n";
-
-                // Reset running training average after
-                // validation so we can see the current
-                // training trend more clearly.
-
-                total_train_loss = 0.0;
-                train_loss_count = 0;
+            if (rank == 1) {
+                ++top1;
             }
+
+            if (rank <= 5) {
+                ++top5;
+            }
+
+            if (rank <= 10) {
+                ++top10;
+            }
+
+            rank_sum +=
+                static_cast<double>(rank);
+
+            // Cross entropy:
+            //
+            // -log(P(real))
+            // ------------------------------------------------
+
+            cross_entropy -=
+                std::log(
+                    std::max(
+                        static_cast<double>(
+                            real_probability
+                        ),
+                        1e-12
+                    )
+                );
+
+            // ------------------------------------------------
+            // Print
+            // ------------------------------------------------
+
+            std::cout
+                << std::setw(4)
+                << step
+                << " | "
+                << std::setw(4)
+                << real_token
+                << " | "
+                << std::setw(4)
+                << prediction
+                << " | "
+                << std::setw(4)
+                << rank
+                << " | ";
+
+            if (rank == 1) {
+                std::cout
+                    << " YES ";
+            } else {
+                std::cout
+                    << "  NO ";
+            }
+
+            std::cout
+                << " | ";
+
+            if (rank <= 5) {
+                std::cout
+                    << " YES ";
+            } else {
+                std::cout
+                    << "  NO ";
+            }
+
+            std::cout
+                << " | ";
+
+            if (rank <= 10) {
+                std::cout
+                    << " YES ";
+            } else {
+                std::cout
+                    << "  NO ";
+            }
+
+            std::cout
+                << " | "
+                << std::fixed
+                << std::setprecision(4)
+                << real_probability
+                << " | "
+                << prediction_probability
+                << "\n";
+
+            // ------------------------------------------------
+            // Feed the REAL token.
+            //
+            // This is the important teacher-forcing part.
+            // ------------------------------------------------
+
+            auto input =
+                CreateInput({
+                    real_token
+                });
+
+            auto output =
+                model.forward(
+                    input
+                );
+
+            cudaDeviceSynchronize();
+
+            saved_logits =
+                CopyLastLogitsToCPU(
+                    output
+                );
         }
 
-        // ----------------------------------------------------
-        // Final synchronization
-        // ----------------------------------------------------
+        // ====================================================
+        // Final statistics
+        // ====================================================
 
-        cudaDeviceSynchronize();
+        double top1_accuracy =
+            100.0 *
+            static_cast<double>(top1) /
+            static_cast<double>(TEST_STEPS);
+
+        double top5_accuracy =
+            100.0 *
+            static_cast<double>(top5) /
+            static_cast<double>(TEST_STEPS);
+
+        double top10_accuracy =
+            100.0 *
+            static_cast<double>(top10) /
+            static_cast<double>(TEST_STEPS);
+
+        double average_rank =
+            rank_sum /
+            static_cast<double>(TEST_STEPS);
+
+        cross_entropy /=
+            static_cast<double>(TEST_STEPS);
+
+        double perplexity =
+            std::exp(
+                cross_entropy
+            );
 
         // ====================================================
         // Result
@@ -888,47 +757,71 @@ int main() {
             << "========================================\n";
 
         std::cout
-            << "Initial validation loss: "
-            << initial_val_loss
+            << "Top-1 accuracy:  "
+            << top1_accuracy
+            << "%\n";
+
+        std::cout
+            << "Top-5 accuracy:  "
+            << top5_accuracy
+            << "%\n";
+
+        std::cout
+            << "Top-10 accuracy: "
+            << top10_accuracy
+            << "%\n";
+
+        std::cout
+            << "Average rank:    "
+            << average_rank
             << "\n";
 
         std::cout
-            << "Best validation loss:    "
-            << best_val_loss
+            << "Cross entropy:   "
+            << cross_entropy
             << "\n";
 
         std::cout
-            << "Best step:               "
-            << best_step
+            << "Perplexity:      "
+            << perplexity
             << "\n";
 
         std::cout
-            << "Final train loss:        "
-            << final_train_loss
             << "\n";
 
-        std::cout
-            << "Final validation loss:   "
-            << final_val_loss
-            << "\n";
+        // ====================================================
+        // Interpretation helpers
+        // ====================================================
 
-        std::cout
-            << "Validation improvement:  "
-            << initial_val_loss -
-               best_val_loss
-            << "\n";
-
-        if (best_val_loss <
-            initial_val_loss) {
+        if (top1_accuracy >= 60.0) {
 
             std::cout
-                << "[OK] Validation loss decreased.\n";
+                << "[OK] Top-1 prediction is strong.\n";
 
         } else {
 
             std::cout
-                << "[WARNING] Validation loss did not decrease.\n";
+                << "[INFO] Top-1 prediction still has room "
+                << "for improvement.\n";
         }
+
+        if (top10_accuracy >= 85.0) {
+
+            std::cout
+                << "[OK] Most real tokens are inside Top-10.\n";
+
+        } else {
+
+            std::cout
+                << "[INFO] Many real tokens are outside Top-10.\n";
+        }
+
+        // ====================================================
+        // Cleanup
+        // ====================================================
+
+        model.SetUseKVCache(false);
+        model.ResetCache();
 
         std::cout
             << "\n========================================\n";
