@@ -22,10 +22,16 @@ const size_t BLOCKS = 4;
 const size_t HEADS = 4;
 const size_t HIDDEN = 512;
 
-const size_t GENERATION_LENGTH = 50;
+const size_t GENERATION_LENGTH = 100;
 
-const float TEMPERATURE = 0.8f;
 const float TOP_P = 0.9f;
+
+const std::vector<float> TEMPERATURES = {
+    0.7f,
+    0.8f,
+    1.0f,
+    1.2f
+};
 
 const std::string TOKENIZER_PATH =
     "/content/Text_LLM/Models/MargaritaTokenizer";
@@ -43,23 +49,17 @@ const std::string PROMPT =
 void PrintText(
     const std::string& prompt,
     const std::vector<size_t>& generated,
-    BPETokenizer& tokenizer
+    BPETokenizer& tokenizer,
+    float temperature
 ) {
     std::string generated_text =
         tokenizer.Decode(generated);
 
     std::cout
         << "\n========================================\n"
-        << "PROMPT\n"
-        << "========================================\n";
-
-    std::cout
-        << prompt
-        << "\n";
-
-    std::cout
-        << "\n========================================\n"
-        << "GENERATED\n"
+        << "Temperature: "
+        << temperature
+        << "\n"
         << "========================================\n";
 
     std::cout
@@ -90,7 +90,9 @@ std::vector<size_t> EncodePrompt(
     }
 
     for (size_t token : tokens) {
+
         if (token >= tokenizer.GetVocabSize()) {
+
             throw std::runtime_error(
                 "Prompt contains invalid token id"
             );
@@ -115,7 +117,7 @@ int main() {
 
         std::cout
             << "========================================\n"
-            << "       MARGARITA CUDA GENERATION TEST\n"
+            << "       MARGARITA CUDA SAMPLING TEST\n"
             << "========================================\n\n";
 
         // ----------------------------------------------------
@@ -128,6 +130,7 @@ int main() {
             cudaGetDeviceCount(&device_count);
 
         if (error != cudaSuccess) {
+
             throw std::runtime_error(
                 std::string(
                     "cudaGetDeviceCount failed: "
@@ -142,6 +145,7 @@ int main() {
             << "\n";
 
         if (device_count == 0) {
+
             throw std::runtime_error(
                 "No CUDA devices found"
             );
@@ -303,64 +307,91 @@ int main() {
             << "\n";
 
         std::cout
-            << "Temperature: "
-            << TEMPERATURE
-            << "\n";
-
-        std::cout
             << "Top-p: "
             << TOP_P
             << "\n";
 
-        std::vector<size_t> generated =
-            model.generate(
-                tokens,
-                GENERATION_LENGTH,
-                TEMPERATURE,
-                TOP_P,
-                -1
-            );
+        std::cout
+            << "Temperatures: ";
 
-        cudaDeviceSynchronize();
+        for (float temperature : TEMPERATURES) {
 
-        // ----------------------------------------------------
-        // Basic validation
-        // ----------------------------------------------------
-
-        if (generated.size() !=
-            GENERATION_LENGTH) {
-
-            throw std::runtime_error(
-                "Generation returned unexpected "
-                "number of tokens"
-            );
+            std::cout
+                << temperature
+                << " ";
         }
 
-        for (size_t token : generated) {
+        std::cout
+            << "\n";
 
-            if (token >= VOCAB_SIZE) {
+        // ----------------------------------------------------
+        // Run all sampling tests
+        // ----------------------------------------------------
+
+        for (float temperature : TEMPERATURES) {
+
+            std::cout
+                << "\n----------------------------------------\n"
+                << "Generating with temperature = "
+                << temperature
+                << "\n"
+                << "----------------------------------------\n";
+
+            // На всякий случай очищаем KV cache
+            // перед каждой независимой генерацией.
+            model.ResetCache();
+
+            std::vector<size_t> generated =
+                model.generate(
+                    tokens,
+                    GENERATION_LENGTH,
+                    temperature,
+                    TOP_P,
+                    -1
+                );
+
+            cudaDeviceSynchronize();
+
+            // ------------------------------------------------
+            // Validation
+            // ------------------------------------------------
+
+            if (generated.size() !=
+                GENERATION_LENGTH) {
 
                 throw std::runtime_error(
-                    "Generated invalid token id"
+                    "Generation returned unexpected "
+                    "number of tokens"
                 );
             }
+
+            for (size_t token : generated) {
+
+                if (token >= VOCAB_SIZE) {
+
+                    throw std::runtime_error(
+                        "Generated invalid token id"
+                    );
+                }
+            }
+
+            std::cout
+                << "[OK] Generated token count is correct.\n";
+
+            std::cout
+                << "[OK] All generated token ids are valid.\n";
+
+            // ------------------------------------------------
+            // Print
+            // ------------------------------------------------
+
+            PrintText(
+                PROMPT,
+                generated,
+                tokenizer,
+                temperature
+            );
         }
-
-        std::cout
-            << "[OK] Generated token count is correct.\n";
-
-        std::cout
-            << "[OK] All generated token ids are valid.\n";
-
-        // ----------------------------------------------------
-        // Print result
-        // ----------------------------------------------------
-
-        PrintText(
-            PROMPT,
-            generated,
-            tokenizer
-        );
 
         // ----------------------------------------------------
         // Result
@@ -368,7 +399,7 @@ int main() {
 
         std::cout
             << "\n========================================\n"
-            << "       GENERATION TEST PASSED\n"
+            << "       SAMPLING TEST PASSED\n"
             << "========================================\n";
 
     }
