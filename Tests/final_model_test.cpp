@@ -1,5 +1,6 @@
 #include "../Engine/Layers/language_model.h"
 #include "../Engine/Tokenizer/bpe_tokenizer.h"
+#include "../Engine/Layers/ce_loss.h"
 #include "../Engine/Tensor/tensor.h"
 #include "../Engine/Tensor/device.h"
 
@@ -10,6 +11,9 @@
 #include <string>
 #include <stdexcept>
 #include <filesystem>
+#include <fstream>
+#include <random>
+#include <numeric>
 
 // ============================================================
 // Настройки
@@ -22,16 +26,12 @@ const size_t BLOCKS = 4;
 const size_t HEADS = 4;
 const size_t HIDDEN = 512;
 
-const size_t GENERATION_LENGTH = 100;
+const size_t CONTEXT = 128;
 
-const float TOP_P = 0.9f;
+const size_t VALIDATION_WINDOWS = 200;
 
-const std::vector<float> TEMPERATURES = {
-    0.7f,
-    0.8f,
-    1.0f,
-    1.2f
-};
+const std::string DATA_PATH =
+    "/content/Text_LLM/Data/master_and_margarita.txt";
 
 const std::string TOKENIZER_PATH =
     "/content/Text_LLM/Models/MargaritaTokenizer";
@@ -39,72 +39,142 @@ const std::string TOKENIZER_PATH =
 const std::string MODEL_PATH =
     "/content/Text_LLM/Models/MargaritaCUDA/step_20000";
 
-const std::string PROMPT =
-    "The Master and Margarita";
-
 // ============================================================
-// Print generated text
+// Read corpus
 // ============================================================
 
-void PrintText(
-    const std::string& prompt,
-    const std::vector<size_t>& generated,
-    BPETokenizer& tokenizer,
-    float temperature
+std::string ReadFile(
+    const std::string& path
 ) {
-    std::string generated_text =
-        tokenizer.Decode(generated);
+    std::ifstream file(path);
 
-    std::cout
-        << "\n========================================\n"
-        << "Temperature: "
-        << temperature
-        << "\n"
-        << "========================================\n";
-
-    std::cout
-        << generated_text
-        << "\n";
-
-    std::cout
-        << "\nGenerated tokens: "
-        << generated.size()
-        << "\n";
-}
-
-// ============================================================
-// Encode prompt
-// ============================================================
-
-std::vector<size_t> EncodePrompt(
-    BPETokenizer& tokenizer,
-    const std::string& prompt
-) {
-    std::vector<size_t> tokens =
-        tokenizer.Encode(prompt);
-
-    if (tokens.empty()) {
+    if (!file.is_open()) {
         throw std::runtime_error(
-            "Prompt produced no tokens"
+            "Cannot open corpus: " + path
         );
     }
 
-    for (size_t token : tokens) {
+    std::string text(
+        (std::istreambuf_iterator<char>(file)),
+        std::istreambuf_iterator<char>()
+    );
 
-        if (token >= tokenizer.GetVocabSize()) {
-
-            throw std::runtime_error(
-                "Prompt contains invalid token id"
-            );
-        }
+    if (text.empty()) {
+        throw std::runtime_error(
+            "Corpus is empty"
+        );
     }
 
-    std::cout
-        << "Prompt tokens: "
-        << tokens.size()
-        << "\n";
+    return text;
+}
 
-    return tokens;
+// ============================================================
+// Get scalar from tensor
+// ============================================================
+
+float GetScalar(
+    const Tensor& tensor
+) {
+    if (tensor.GetSize() != 1) {
+        throw std::runtime_error(
+            "Expected scalar tensor"
+        );
+    }
+
+    if (tensor.GetDevice() == Device::CPU) {
+        return tensor.Data()[0];
+    }
+
+    float value = 0.0f;
+
+    cudaError_t error =
+        cudaMemcpy(
+            &value,
+            tensor.Data(),
+            sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string(
+                "cudaMemcpy failed: "
+            ) +
+            cudaGetErrorString(error)
+        );
+    }
+
+    return value;
+}
+
+// ============================================================
+// Create CUDA input tensor
+// ============================================================
+
+Tensor CreateInput(
+    const std::vector<size_t>& tokens,
+    size_t start
+) {
+    Tensor cpu_input(
+        {1, CONTEXT},
+        0.0f,
+        Device::CPU
+    );
+
+    for (size_t i = 0; i < CONTEXT; ++i) {
+
+        cpu_input.Data()[i] =
+            static_cast<float>(
+                tokens[start + i]
+            );
+    }
+
+    Tensor cuda_input(
+        {1, CONTEXT},
+        0.0f,
+        Device::CUDA
+    );
+
+    cpu_input.CopyToCUDA(
+        cuda_input
+    );
+
+    return cuda_input;
+}
+
+// ============================================================
+// Create CUDA target tensor
+// ============================================================
+
+Tensor CreateTarget(
+    const std::vector<size_t>& tokens,
+    size_t start
+) {
+    Tensor cpu_target(
+        {1, CONTEXT},
+        0.0f,
+        Device::CPU
+    );
+
+    for (size_t i = 0; i < CONTEXT; ++i) {
+
+        cpu_target.Data()[i] =
+            static_cast<float>(
+                tokens[start + i + 1]
+            );
+    }
+
+    Tensor cuda_target(
+        {1, CONTEXT},
+        0.0f,
+        Device::CUDA
+    );
+
+    cpu_target.CopyToCUDA(
+        cuda_target
+    );
+
+    return cuda_target;
 }
 
 // ============================================================
@@ -117,7 +187,7 @@ int main() {
 
         std::cout
             << "========================================\n"
-            << "       MARGARITA CUDA SAMPLING TEST\n"
+            << "       MARGARITA CUDA VALIDATION TEST\n"
             << "========================================\n\n";
 
         // ----------------------------------------------------
@@ -127,7 +197,9 @@ int main() {
         int device_count = 0;
 
         cudaError_t error =
-            cudaGetDeviceCount(&device_count);
+            cudaGetDeviceCount(
+                &device_count
+            );
 
         if (error != cudaSuccess) {
 
@@ -173,6 +245,15 @@ int main() {
             << "========================================\n";
 
         if (!std::filesystem::exists(
+                DATA_PATH)) {
+
+            throw std::runtime_error(
+                "Corpus not found: " +
+                DATA_PATH
+            );
+        }
+
+        if (!std::filesystem::exists(
                 TOKENIZER_PATH)) {
 
             throw std::runtime_error(
@@ -191,17 +272,39 @@ int main() {
         }
 
         std::cout
+            << "[OK] Corpus found.\n";
+
+        std::cout
             << "[OK] Tokenizer found.\n";
 
         std::cout
             << "[OK] Model found.\n\n";
 
         // ----------------------------------------------------
-        // Load tokenizer
+        // Load corpus
         // ----------------------------------------------------
 
         std::cout
             << "========================================\n"
+            << "            LOADING CORPUS\n"
+            << "========================================\n";
+
+        std::string corpus =
+            ReadFile(
+                DATA_PATH
+            );
+
+        std::cout
+            << "Corpus characters: "
+            << corpus.size()
+            << "\n";
+
+        // ----------------------------------------------------
+        // Load tokenizer
+        // ----------------------------------------------------
+
+        std::cout
+            << "\n========================================\n"
             << "        LOADING TOKENIZER\n"
             << "========================================\n";
 
@@ -225,6 +328,71 @@ int main() {
             throw std::runtime_error(
                 "Tokenizer vocabulary does not "
                 "match model vocabulary"
+            );
+        }
+
+        // ----------------------------------------------------
+        // Encode corpus
+        // ----------------------------------------------------
+
+        std::cout
+            << "\n========================================\n"
+            << "           ENCODING CORPUS\n"
+            << "========================================\n";
+
+        std::vector<size_t> tokens =
+            tokenizer.Encode(
+                corpus
+            );
+
+        if (tokens.empty()) {
+
+            throw std::runtime_error(
+                "Corpus produced no tokens"
+            );
+        }
+
+        std::cout
+            << "[OK] Corpus encoded.\n";
+
+        std::cout
+            << "Total tokens: "
+            << tokens.size()
+            << "\n";
+
+        // ----------------------------------------------------
+        // Train / validation split
+        // ----------------------------------------------------
+
+        size_t train_size =
+            tokens.size() * 9 / 10;
+
+        size_t validation_start =
+            train_size;
+
+        size_t validation_tokens =
+            tokens.size() - validation_start;
+
+        std::cout
+            << "\n========================================\n"
+            << "          DATASET SPLIT\n"
+            << "========================================\n";
+
+        std::cout
+            << "Train tokens: "
+            << train_size
+            << "\n";
+
+        std::cout
+            << "Validation tokens: "
+            << validation_tokens
+            << "\n";
+
+        if (validation_tokens <=
+            CONTEXT + 1) {
+
+            throw std::runtime_error(
+                "Validation set is too small"
             );
         }
 
@@ -273,133 +441,173 @@ int main() {
             << "[OK] Model loaded.\n";
 
         // ----------------------------------------------------
-        // Encode prompt
+        // Validation
         // ----------------------------------------------------
 
         std::cout
             << "\n========================================\n"
-            << "          ENCODING PROMPT\n"
+            << "             VALIDATION\n"
             << "========================================\n";
 
         std::cout
-            << "Prompt:\n"
-            << PROMPT
+            << "Validation windows: "
+            << VALIDATION_WINDOWS
             << "\n";
 
-        std::vector<size_t> tokens =
-            EncodePrompt(
-                tokenizer,
-                PROMPT
+        std::cout
+            << "Context: "
+            << CONTEXT
+            << "\n";
+
+        std::cout
+            << "\n";
+
+        CrossEntropyLoss loss;
+
+        std::mt19937 generator(42);
+
+        size_t max_start =
+            tokens.size() - CONTEXT - 1;
+
+        std::uniform_int_distribution<size_t>
+            distribution(
+                validation_start,
+                max_start
             );
 
-        // ----------------------------------------------------
-        // Generation
-        // ----------------------------------------------------
+        double total_loss = 0.0;
 
-        std::cout
-            << "\n========================================\n"
-            << "            GENERATION\n"
-            << "========================================\n";
+        size_t successful_windows = 0;
 
-        std::cout
-            << "Tokens to generate: "
-            << GENERATION_LENGTH
-            << "\n";
+        for (size_t step = 0;
+             step < VALIDATION_WINDOWS;
+             ++step) {
 
-        std::cout
-            << "Top-p: "
-            << TOP_P
-            << "\n";
+            size_t start =
+                distribution(
+                    generator
+                );
 
-        std::cout
-            << "Temperatures: ";
-
-        for (float temperature : TEMPERATURES) {
-
-            std::cout
-                << temperature
-                << " ";
-        }
-
-        std::cout
-            << "\n";
-
-        // ----------------------------------------------------
-        // Run all sampling tests
-        // ----------------------------------------------------
-
-        for (float temperature : TEMPERATURES) {
-
-            std::cout
-                << "\n----------------------------------------\n"
-                << "Generating with temperature = "
-                << temperature
-                << "\n"
-                << "----------------------------------------\n";
-
-            // На всякий случай очищаем KV cache
-            // перед каждой независимой генерацией.
-            model.ResetCache();
-
-            std::vector<size_t> generated =
-                model.generate(
+            Tensor input =
+                CreateInput(
                     tokens,
-                    GENERATION_LENGTH,
-                    temperature,
-                    TOP_P,
-                    -1
+                    start
+                );
+
+            Tensor target =
+                CreateTarget(
+                    tokens,
+                    start
+                );
+
+            auto input_ptr =
+                std::make_shared<Tensor>(
+                    std::move(input)
+                );
+
+            auto logits =
+                model.forward(
+                    input_ptr
+                );
+
+            Tensor current_loss =
+                loss.forward(
+                    *logits,
+                    target
                 );
 
             cudaDeviceSynchronize();
 
-            // ------------------------------------------------
-            // Validation
-            // ------------------------------------------------
+            float loss_value =
+                GetScalar(
+                    current_loss
+                );
 
-            if (generated.size() !=
-                GENERATION_LENGTH) {
+            if (!std::isfinite(
+                    loss_value)) {
 
                 throw std::runtime_error(
-                    "Generation returned unexpected "
-                    "number of tokens"
+                    "Validation produced "
+                    "non-finite loss"
                 );
             }
 
-            for (size_t token : generated) {
+            total_loss +=
+                static_cast<double>(
+                    loss_value
+                );
 
-                if (token >= VOCAB_SIZE) {
+            ++successful_windows;
 
-                    throw std::runtime_error(
-                        "Generated invalid token id"
+            if (
+                step == 0 ||
+                (step + 1) % 25 == 0 ||
+                step + 1 == VALIDATION_WINDOWS
+            ) {
+
+                double average =
+                    total_loss /
+                    static_cast<double>(
+                        successful_windows
                     );
-                }
+
+                std::cout
+                    << "Window "
+                    << (step + 1)
+                    << " / "
+                    << VALIDATION_WINDOWS
+                    << " | Loss: "
+                    << loss_value
+                    << " | Avg: "
+                    << average
+                    << "\n";
             }
-
-            std::cout
-                << "[OK] Generated token count is correct.\n";
-
-            std::cout
-                << "[OK] All generated token ids are valid.\n";
-
-            // ------------------------------------------------
-            // Print
-            // ------------------------------------------------
-
-            PrintText(
-                PROMPT,
-                generated,
-                tokenizer,
-                temperature
-            );
         }
 
+        cudaDeviceSynchronize();
+
         // ----------------------------------------------------
-        // Result
+        // Final result
         // ----------------------------------------------------
+
+        double validation_loss =
+            total_loss /
+            static_cast<double>(
+                successful_windows
+            );
 
         std::cout
             << "\n========================================\n"
-            << "       SAMPLING TEST PASSED\n"
+            << "         VALIDATION RESULT\n"
+            << "========================================\n";
+
+        std::cout
+            << "Validation windows: "
+            << successful_windows
+            << "\n";
+
+        std::cout
+            << "Validation loss: "
+            << validation_loss
+            << "\n";
+
+        if (!std::isfinite(
+                validation_loss)) {
+
+            throw std::runtime_error(
+                "Validation loss is not finite"
+            );
+        }
+
+        std::cout
+            << "\n[OK] Validation loss is finite.\n";
+
+        std::cout
+            << "[OK] Validation completed.\n";
+
+        std::cout
+            << "\n========================================\n"
+            << "       VALIDATION TEST PASSED\n"
             << "========================================\n";
 
     }
