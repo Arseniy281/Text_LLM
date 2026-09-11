@@ -59,7 +59,7 @@ std::string ReadFile(const std::string& path) {
 // ============================================================
 
 void PrintTokens(
-    const BPETokenizer& tokenizer,
+    BPETokenizer& tokenizer,
     const std::vector<size_t>& tokens
 ) {
     std::string text = tokenizer.Decode(tokens);
