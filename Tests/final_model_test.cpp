@@ -315,28 +315,29 @@ int main() {
 
             model.ClearGrad();
 
-            Tensor logits =
-                model.forward(input);
-
-            // ------------------------------------------------
-            // Last-token predictions
-            // ------------------------------------------------
-
-            Tensor logits_cpu(
-                logits->GetShape(),
-                0.0f,
-                Device::CPU
+            auto input_ptr =
+            std::make_shared<Tensor>(
+                std::move(input)
             );
 
-            cudaMemcpy(
-                logits_cpu.Data(),
-                logits->Data(),
-                logits->GetSize() * sizeof(float),
-                cudaMemcpyDeviceToHost
-            );
+        std::shared_ptr<Tensor> logits =
+            model.forward(input_ptr);
 
-            const auto& shape =
-                logits->GetShape();
+        Tensor logits_cpu(
+            logits->GetShape(),
+            0.0f,
+            Device::CPU
+        );
+
+        cudaMemcpy(
+            logits_cpu.Data(),
+            logits->Data(),
+            logits->GetSize() * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+        const auto& shape =
+            logits->GetShape();
 
             size_t sequence_length =
                 shape[1];
