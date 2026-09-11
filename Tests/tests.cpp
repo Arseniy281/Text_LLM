@@ -13,6 +13,7 @@
 #include <random>
 #include <iomanip>
 #include <stdexcept>
+#include <filesystem>
 
 // ============================================================
 // Настройки
@@ -325,6 +326,8 @@ int main() {
                 "Tokenizer vocabulary size does not match model"
             );
         }
+
+        std::filesystem::create_directories("../Models");
 
         tokenizer.Save(
             TOKENIZER_PATH
