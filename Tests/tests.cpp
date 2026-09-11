@@ -1,4 +1,4 @@
-#include "../Engine/LanguageModel/language_model.h"
+#include "../Engine/Layers/language_model.h"
 #include "../Engine/Tokenizer/bpe_tokenizer.h"
 #include "../Engine/Tensor/tensor.h"
 
