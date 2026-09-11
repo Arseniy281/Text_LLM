@@ -25,6 +25,9 @@ const std::string TOKENIZER_PATH =
 const std::string CORPUS_PATH =
     "../Data/master_and_margarita.txt";
 
+const std::string MODEL_PATH =
+    "../Models/MargaritaLR2000_final";
+
 const size_t VOCAB_SIZE = 1000;
 
 const size_t EMBED_DIM = 128;
@@ -873,6 +876,22 @@ int main() {
         // ----------------------------------------------------
 
         cudaDeviceSynchronize();
+
+        // ----------------------------------------------------
+        // Save final model
+        // ----------------------------------------------------
+
+        std::cout
+            << "\nSaving final model...\n";
+
+        model.Save(
+            MODEL_PATH
+        );
+
+        std::cout
+            << "[OK] Model saved to: "
+            << MODEL_PATH
+            << "\n";
 
         // ====================================================
         // Result
