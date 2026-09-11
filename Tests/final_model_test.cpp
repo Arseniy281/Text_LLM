@@ -37,7 +37,7 @@ const std::string TOKENIZER_PATH =
     "/content/Text_LLM/Models/MargaritaTokenizer";
 
 const std::string MODEL_PATH =
-    "/content/Text_LLM/Models/MargaritaConstantLR_best";
+    "../Models/MargaritaCUDA/step_20000";
 
 const std::string PROMPT =
     "The Master and Margarita";
