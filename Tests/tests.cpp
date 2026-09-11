@@ -1,16 +1,43 @@
+#include "../Engine/Layers/language_model.h"
 #include "../Engine/Tokenizer/bpe_tokenizer.h"
+#include "../Engine/Tensor/tensor.h"
 
-#include <iostream>
+#include <cuda_runtime.h>
+
+#include <algorithm>
+#include <cmath>
 #include <fstream>
+#include <iostream>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
-#include <stdexcept>
+
+// ============================================================
+// Настройки
+// ============================================================
 
 const std::string TOKENIZER_PATH =
     "../Models/MargaritaTokenizer";
 
+const std::string MODEL_PATH =
+    "../Models/MargaritaCUDA/step_20000";
+
 const std::string CORPUS_PATH =
     "../Data/master_and_margarita.txt";
+
+const size_t VOCAB_SIZE = 1000;
+const size_t EMBED_DIM = 128;
+const size_t BLOCKS = 4;
+const size_t HEADS = 4;
+const size_t HIDDEN = 512;
+
+const size_t PROMPT_SIZE = 32;
+const size_t TEST_STEPS = 50;
+
+// ============================================================
+// Read file
+// ============================================================
 
 std::string ReadFile(const std::string& path) {
 
@@ -28,96 +55,121 @@ std::string ReadFile(const std::string& path) {
     );
 }
 
-void TestString(
-    BPETokenizer& tokenizer,
-    const std::string& text
+// ============================================================
+// CUDA logits -> CPU
+// ============================================================
+
+std::vector<float> CopyLastLogitsToCPU(
+    const std::shared_ptr<Tensor>& logits
 ) {
-    std::cout << "----------------------------------------\n";
-    std::cout << "Original:\n";
-    std::cout << text << "\n\n";
+    const auto& shape =
+        logits->GetShape();
 
-    auto tokens =
-        tokenizer.Encode(text);
-
-    std::cout
-        << "Tokens: "
-        << tokens.size()
-        << "\n";
-
-    std::cout
-        << "IDs: ";
-
-    for (size_t id : tokens) {
-        std::cout << id << " ";
+    if (shape.size() != 3) {
+        throw std::runtime_error(
+            "Expected logits rank 3"
+        );
     }
 
-    std::cout << "\n\n";
+    if (shape[0] != 1) {
+        throw std::runtime_error(
+            "Expected batch size 1"
+        );
+    }
 
-    std::string decoded =
-        tokenizer.Decode(tokens);
+    size_t seq_len = shape[1];
+    size_t vocab = shape[2];
 
-    std::cout << "Decoded:\n";
-    std::cout << decoded << "\n\n";
+    std::vector<float> result(vocab);
 
-    if (decoded == text) {
-        std::cout
-            << "[OK] Round-trip is exact.\n";
-    } else {
-        std::cout
-            << "[FAIL] Round-trip differs!\n";
+    size_t offset =
+        (seq_len - 1) * vocab;
 
-        std::cout
-            << "Original size: "
-            << text.size()
-            << "\n";
+    cudaError_t error = cudaMemcpy(
+        result.data(),
+        logits->Data() + offset,
+        vocab * sizeof(float),
+        cudaMemcpyDeviceToHost
+    );
 
-        std::cout
-            << "Decoded size:  "
-            << decoded.size()
-            << "\n";
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string("cudaMemcpy failed: ") +
+            cudaGetErrorString(error)
+        );
+    }
 
-        size_t min_size =
-            std::min(
-                text.size(),
-                decoded.size()
-            );
+    return result;
+}
 
-        for (size_t i = 0;
-             i < min_size;
-             ++i) {
+// ============================================================
+// Create CUDA input
+//
+// Shape:
+// [1, seq]
+//
+// ============================================================
 
-            if (text[i] != decoded[i]) {
-
-                std::cout
-                    << "First difference at byte "
-                    << i
-                    << "\n";
-
-                std::cout
-                    << "Original byte: "
-                    << static_cast<int>(
-                        static_cast<unsigned char>(
-                            text[i]
-                        )
-                    )
-                    << "\n";
-
-                std::cout
-                    << "Decoded byte:  "
-                    << static_cast<int>(
-                        static_cast<unsigned char>(
-                            decoded[i]
-                        )
-                    )
-                    << "\n";
-
-                break;
+std::shared_ptr<Tensor> CreateInput(
+    const std::vector<size_t>& tokens
+) {
+    auto cpu =
+        std::make_shared<Tensor>(
+            std::vector<size_t>{
+                1,
+                tokens.size()
             }
+        );
+
+    for (size_t i = 0;
+         i < tokens.size();
+         ++i) {
+
+        cpu->at({0, i}) =
+            static_cast<float>(
+                tokens[i]
+            );
+    }
+
+    auto gpu =
+        std::make_shared<Tensor>(
+            std::vector<size_t>{
+                1,
+                tokens.size()
+            },
+            0.0f,
+            Device::CUDA
+        );
+
+    cpu->CopyToCUDA(*gpu);
+
+    return gpu;
+}
+
+// ============================================================
+// ArgMax
+// ============================================================
+
+size_t ArgMax(
+    const std::vector<float>& values
+) {
+    size_t best = 0;
+
+    for (size_t i = 1;
+         i < values.size();
+         ++i) {
+
+        if (values[i] > values[best]) {
+            best = i;
         }
     }
 
-    std::cout << "\n";
+    return best;
 }
+
+// ============================================================
+// Main
+// ============================================================
 
 int main() {
 
@@ -126,9 +178,44 @@ int main() {
         std::cout
             << "========================================\n";
         std::cout
-            << "BPE ROUND-TRIP TEST\n";
+            << "GREEDY VS TEACHER-FORCED TEST\n";
         std::cout
             << "========================================\n\n";
+
+        // ----------------------------------------------------
+        // CUDA
+        // ----------------------------------------------------
+
+        int device_count = 0;
+
+        cudaError_t error =
+            cudaGetDeviceCount(
+                &device_count
+            );
+
+        if (error != cudaSuccess ||
+            device_count == 0) {
+
+            throw std::runtime_error(
+                "CUDA device not available"
+            );
+        }
+
+        cudaDeviceProp prop{};
+
+        cudaGetDeviceProperties(
+            &prop,
+            0
+        );
+
+        std::cout
+            << "GPU: "
+            << prop.name
+            << "\n\n";
+
+        // ----------------------------------------------------
+        // Tokenizer
+        // ----------------------------------------------------
 
         BPETokenizer tokenizer;
 
@@ -139,194 +226,500 @@ int main() {
         std::cout
             << "[OK] Tokenizer loaded.\n";
 
-        std::cout
-            << "Vocabulary size: "
-            << tokenizer.GetVocabSize()
-            << "\n\n";
-
         // ----------------------------------------------------
-        // 1. Простые строки
-        // ----------------------------------------------------
-
-        TestString(
-            tokenizer,
-            "Hello world!"
-        );
-
-        TestString(
-            tokenizer,
-            "The Master and Margarita"
-        );
-
-        TestString(
-            tokenizer,
-            "Hello, world!\nThis is a test."
-        );
-
-        // ----------------------------------------------------
-        // 2. Русский / UTF-8
-        // ----------------------------------------------------
-
-        TestString(
-            tokenizer,
-            "Привет, мир!"
-        );
-
-        TestString(
-            tokenizer,
-            "Мастер и Маргарита"
-        );
-
-        // ----------------------------------------------------
-        // 3. Фрагмент реальной книги
+        // Corpus
         // ----------------------------------------------------
 
         std::string corpus =
             ReadFile(CORPUS_PATH);
 
-        if (corpus.empty()) {
+        std::vector<size_t> tokens =
+            tokenizer.Encode(corpus);
+
+        std::cout
+            << "[OK] Corpus encoded.\n";
+
+        std::cout
+            << "Tokens: "
+            << tokens.size()
+            << "\n\n";
+
+        // ----------------------------------------------------
+        // Validation position
+        // ----------------------------------------------------
+
+        size_t train_size =
+            static_cast<size_t>(
+                tokens.size() * 0.9
+            );
+
+        size_t validation_start =
+            train_size;
+
+        size_t start =
+            validation_start + 14136;
+
+        if (start +
+                PROMPT_SIZE +
+                TEST_STEPS >=
+            tokens.size()) {
+
             throw std::runtime_error(
-                "Corpus is empty"
+                "Invalid test position"
             );
         }
 
-        size_t test_size =
-            std::min<size_t>(
-                2000,
-                corpus.size()
-            );
+        std::cout
+            << "Validation token position: "
+            << start
+            << "\n";
 
-        std::string fragment =
-            corpus.substr(
-                0,
-                test_size
+        std::cout
+            << "Prompt size: "
+            << PROMPT_SIZE
+            << "\n";
+
+        std::cout
+            << "Test steps: "
+            << TEST_STEPS
+            << "\n\n";
+
+        // ====================================================
+        // Create TWO identical models
+        //
+        // Teacher model:
+        // uses real previous tokens.
+        //
+        // Greedy model:
+        // uses its own predictions.
+        //
+        // They must have identical weights.
+        // ====================================================
+
+        LanguageModel teacher_model(
+            VOCAB_SIZE,
+            EMBED_DIM,
+            BLOCKS,
+            HEADS,
+            HIDDEN,
+            Device::CUDA
+        );
+
+        LanguageModel greedy_model(
+            VOCAB_SIZE,
+            EMBED_DIM,
+            BLOCKS,
+            HEADS,
+            HIDDEN,
+            Device::CUDA
+        );
+
+        std::cout
+            << "[OK] Models created.\n";
+
+        teacher_model.LoadModel(
+            MODEL_PATH
+        );
+
+        greedy_model.LoadModel(
+            MODEL_PATH
+        );
+
+        std::cout
+            << "[OK] Models loaded.\n\n";
+
+        // ----------------------------------------------------
+        // Enable KV cache
+        // ----------------------------------------------------
+
+        teacher_model.SetUseKVCache(true);
+        greedy_model.SetUseKVCache(true);
+
+        teacher_model.ResetCache();
+        greedy_model.ResetCache();
+
+        // ====================================================
+        // Prompt
+        // ====================================================
+
+        std::vector<size_t> prompt;
+
+        for (size_t i = 0;
+             i < PROMPT_SIZE;
+             ++i) {
+
+            prompt.push_back(
+                tokens[start + i]
             );
+        }
+
+        // ====================================================
+        // Initialize both models with the same prompt
+        // ====================================================
+
+        std::vector<float> teacher_logits;
+        std::vector<float> greedy_logits;
+
+        for (size_t i = 0;
+             i < prompt.size();
+             ++i) {
+
+            auto teacher_input =
+                CreateInput({
+                    prompt[i]
+                });
+
+            auto greedy_input =
+                CreateInput({
+                    prompt[i]
+                });
+
+            auto teacher_output =
+                teacher_model.forward(
+                    teacher_input
+                );
+
+            auto greedy_output =
+                greedy_model.forward(
+                    greedy_input
+                );
+
+            cudaDeviceSynchronize();
+
+            if (i + 1 == prompt.size()) {
+
+                teacher_logits =
+                    CopyLastLogitsToCPU(
+                        teacher_output
+                    );
+
+                greedy_logits =
+                    CopyLastLogitsToCPU(
+                        greedy_output
+                    );
+            }
+        }
+
+        // ----------------------------------------------------
+        // Check that both models agree after prompt
+        // ----------------------------------------------------
+
+        size_t teacher_first =
+            ArgMax(teacher_logits);
+
+        size_t greedy_first =
+            ArgMax(greedy_logits);
+
+        float max_difference = 0.0f;
+
+        for (size_t i = 0;
+             i < teacher_logits.size();
+             ++i) {
+
+            max_difference =
+                std::max(
+                    max_difference,
+                    std::abs(
+                        teacher_logits[i] -
+                        greedy_logits[i]
+                    )
+                );
+        }
 
         std::cout
             << "========================================\n";
         std::cout
-            << "REAL CORPUS TEST\n";
+            << "PROMPT COMPARISON\n";
         std::cout
             << "========================================\n\n";
 
-        auto tokens =
-            tokenizer.Encode(fragment);
-
-        std::string decoded =
-            tokenizer.Decode(tokens);
-
         std::cout
-            << "Original bytes: "
-            << fragment.size()
+            << "Teacher prediction: "
+            << teacher_first
             << "\n";
 
         std::cout
-            << "Token count:    "
-            << tokens.size()
+            << "Greedy prediction:  "
+            << greedy_first
             << "\n";
 
         std::cout
-            << "Decoded bytes:  "
-            << decoded.size()
+            << "Max logits difference: "
+            << max_difference
             << "\n\n";
 
-        if (decoded == fragment) {
+        if (teacher_first != greedy_first) {
+
+            throw std::runtime_error(
+                "Models disagree after identical prompt"
+            );
+        }
+
+        if (max_difference > 1e-4f) {
+
+            throw std::runtime_error(
+                "Model outputs differ after identical prompt"
+            );
+        }
+
+        std::cout
+            << "[OK] Models are identical.\n\n";
+
+        // ====================================================
+        // Autoregressive comparison
+        // ====================================================
+
+        size_t teacher_correct = 0;
+        size_t greedy_correct = 0;
+
+        size_t first_greedy_mismatch =
+            TEST_STEPS;
+
+        std::vector<size_t> greedy_tokens;
+
+        greedy_tokens.reserve(
+            TEST_STEPS
+        );
+
+        std::cout
+            << "========================================\n";
+        std::cout
+            << "AUTOREGRESSIVE COMPARISON\n";
+        std::cout
+            << "========================================\n\n";
+
+        std::cout
+            << "Step | Real | Teacher | Greedy | Status\n";
+        std::cout
+            << "----------------------------------------\n";
+
+        for (size_t step = 0;
+             step < TEST_STEPS;
+             ++step) {
+
+            // ------------------------------------------------
+            // The real next token
+            // ------------------------------------------------
+
+            size_t real_token =
+                tokens[
+                    start +
+                    PROMPT_SIZE +
+                    step
+                ];
+
+            // ------------------------------------------------
+            // Teacher prediction
+            //
+            // Uses the REAL previous token.
+            // ------------------------------------------------
+
+            size_t teacher_prediction =
+                ArgMax(
+                    teacher_logits
+                );
+
+            // ------------------------------------------------
+            // Greedy prediction
+            //
+            // Uses its OWN previous prediction.
+            // ------------------------------------------------
+
+            size_t greedy_prediction =
+                ArgMax(
+                    greedy_logits
+                );
+
+            bool teacher_ok =
+                teacher_prediction ==
+                real_token;
+
+            bool greedy_ok =
+                greedy_prediction ==
+                real_token;
+
+            if (teacher_ok) {
+                ++teacher_correct;
+            }
+
+            if (greedy_ok) {
+                ++greedy_correct;
+            }
+
+            if (!greedy_ok &&
+                first_greedy_mismatch ==
+                    TEST_STEPS) {
+
+                first_greedy_mismatch =
+                    step;
+            }
+
+            greedy_tokens.push_back(
+                greedy_prediction
+            );
 
             std::cout
-                << "[OK] Real corpus round-trip is exact.\n";
+                << step
+                << " | "
+                << real_token
+                << " | "
+                << teacher_prediction
+                << " | "
+                << greedy_prediction
+                << " | ";
+
+            if (greedy_ok) {
+
+                std::cout
+                    << "OK";
+
+            } else {
+
+                std::cout
+                    << "MISMATCH";
+            }
+
+            std::cout
+                << "\n";
+
+            // ------------------------------------------------
+            // Teacher forcing:
+            //
+            // Feed REAL token.
+            // ------------------------------------------------
+
+            auto teacher_input =
+                CreateInput({
+                    real_token
+                });
+
+            auto teacher_output =
+                teacher_model.forward(
+                    teacher_input
+                );
+
+            // ------------------------------------------------
+            // Greedy:
+            //
+            // Feed MODEL prediction.
+            // ------------------------------------------------
+
+            auto greedy_input =
+                CreateInput({
+                    greedy_prediction
+                });
+
+            auto greedy_output =
+                greedy_model.forward(
+                    greedy_input
+                );
+
+            cudaDeviceSynchronize();
+
+            teacher_logits =
+                CopyLastLogitsToCPU(
+                    teacher_output
+                );
+
+            greedy_logits =
+                CopyLastLogitsToCPU(
+                    greedy_output
+                );
+        }
+
+        // ====================================================
+        // Results
+        // ====================================================
+
+        std::cout
+            << "\n";
+        std::cout
+            << "========================================\n";
+        std::cout
+            << "RESULT\n";
+        std::cout
+            << "========================================\n";
+
+        std::cout
+            << "Teacher Top-1: "
+            << 100.0 *
+                static_cast<double>(
+                    teacher_correct
+                ) /
+                static_cast<double>(
+                    TEST_STEPS
+                )
+            << "%\n";
+
+        std::cout
+            << "Greedy accuracy: "
+            << 100.0 *
+                static_cast<double>(
+                    greedy_correct
+                ) /
+                static_cast<double>(
+                    TEST_STEPS
+                )
+            << "%\n";
+
+        if (first_greedy_mismatch <
+            TEST_STEPS) {
+
+            std::cout
+                << "First greedy mismatch: step "
+                << first_greedy_mismatch
+                << "\n";
 
         } else {
 
             std::cout
-                << "[FAIL] Real corpus round-trip differs!\n";
-
-            size_t min_size =
-                std::min(
-                    fragment.size(),
-                    decoded.size()
-                );
-
-            for (size_t i = 0;
-                 i < min_size;
-                 ++i) {
-
-                if (fragment[i] != decoded[i]) {
-
-                    std::cout
-                        << "First difference at byte "
-                        << i
-                        << "\n";
-
-                    std::cout
-                        << "Original byte: "
-                        << static_cast<int>(
-                            static_cast<unsigned char>(
-                                fragment[i]
-                            )
-                        )
-                        << "\n";
-
-                    std::cout
-                        << "Decoded byte:  "
-                        << static_cast<int>(
-                            static_cast<unsigned char>(
-                                decoded[i]
-                            )
-                        )
-                        << "\n";
-
-                    size_t from =
-                        i > 30 ? i - 30 : 0;
-
-                    size_t to =
-                        std::min(
-                            i + 30,
-                            fragment.size()
-                        );
-
-                    std::cout
-                        << "\nOriginal context:\n";
-
-                    std::cout
-                        << fragment.substr(
-                            from,
-                            to - from
-                        )
-                        << "\n";
-
-                    to =
-                        std::min(
-                            i + 30,
-                            decoded.size()
-                        );
-
-                    std::cout
-                        << "\nDecoded context:\n";
-
-                    std::cout
-                        << decoded.substr(
-                            from,
-                            to > from
-                                ? to - from
-                                : 0
-                        )
-                        << "\n";
-
-                    break;
-                }
-            }
+                << "First greedy mismatch: none\n";
         }
+
+        std::cout
+            << "\nGenerated token IDs:\n";
+
+        for (size_t token :
+             greedy_tokens) {
+
+            std::cout
+                << token
+                << " ";
+        }
+
+        std::cout
+            << "\n\n";
+
+        // ====================================================
+        // Decode greedy output
+        // ====================================================
+
+        std::string generated =
+            tokenizer.Decode(
+                greedy_tokens
+            );
+
+        std::cout
+            << "Greedy generated text:\n";
+        std::cout
+            << generated
+            << "\n";
 
         std::cout
             << "\n========================================\n";
 
-        return decoded == fragment ? 0 : 1;
+        teacher_model.SetUseKVCache(false);
+        greedy_model.SetUseKVCache(false);
 
+        teacher_model.ResetCache();
+        greedy_model.ResetCache();
+
+        return 0;
     }
     catch (const std::exception& e) {
 
         std::cerr
-            << "[ERROR] "
+            << "\n[ERROR] "
             << e.what()
             << "\n";
 
