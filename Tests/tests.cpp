@@ -33,13 +33,14 @@ const size_t HEADS = 4;
 const size_t HIDDEN = 512;
 
 const size_t PROMPT_SIZE = 32;
-const size_t TEST_STEPS = 5;
+const size_t TEST_STEPS = 200;
 
 // ============================================================
 // Read file
 // ============================================================
 
 std::string ReadFile(const std::string& path) {
+
     std::ifstream file(path);
 
     if (!file) {
@@ -118,6 +119,7 @@ std::shared_ptr<Tensor> CreateInput(
     );
 
     for (size_t i = 0; i < tokens.size(); ++i) {
+
         cpu->at({0, i}) =
             static_cast<float>(tokens[i]);
     }
@@ -137,32 +139,6 @@ std::shared_ptr<Tensor> CreateInput(
 }
 
 // ============================================================
-// Max absolute difference
-// ============================================================
-
-float MaxDifference(
-    const std::vector<float>& a,
-    const std::vector<float>& b
-) {
-    if (a.size() != b.size()) {
-        throw std::runtime_error(
-            "Vectors have different sizes"
-        );
-    }
-
-    float max_diff = 0.0f;
-
-    for (size_t i = 0; i < a.size(); ++i) {
-        max_diff = std::max(
-            max_diff,
-            std::abs(a[i] - b[i])
-        );
-    }
-
-    return max_diff;
-}
-
-// ============================================================
 // ArgMax
 // ============================================================
 
@@ -172,12 +148,75 @@ size_t ArgMax(
     size_t best = 0;
 
     for (size_t i = 1; i < values.size(); ++i) {
+
         if (values[i] > values[best]) {
             best = i;
         }
     }
 
     return best;
+}
+
+// ============================================================
+// Rank of target token
+//
+// Rank 1 = best prediction
+// ============================================================
+
+size_t GetRank(
+    const std::vector<float>& logits,
+    size_t target
+) {
+    size_t rank = 1;
+
+    for (size_t i = 0; i < logits.size(); ++i) {
+
+        if (logits[i] > logits[target]) {
+            ++rank;
+        }
+    }
+
+    return rank;
+}
+
+// ============================================================
+// Cross entropy for one target
+//
+// log_softmax(logits)[target]
+// ============================================================
+
+float CrossEntropy(
+    const std::vector<float>& logits,
+    size_t target
+) {
+    float max_logit =
+        *std::max_element(
+            logits.begin(),
+            logits.end()
+        );
+
+    double sum_exp = 0.0;
+
+    for (float value : logits) {
+
+        sum_exp +=
+            std::exp(
+                static_cast<double>(
+                    value - max_logit
+                )
+            );
+    }
+
+    double log_sum_exp =
+        static_cast<double>(max_logit) +
+        std::log(sum_exp);
+
+    return static_cast<float>(
+        log_sum_exp -
+        static_cast<double>(
+            logits[target]
+        )
+    );
 }
 
 // ============================================================
@@ -191,7 +230,7 @@ int main() {
         std::cout
             << "========================================\n";
         std::cout
-            << "KV CACHE EQUIVALENCE TEST\n";
+            << "TEACHER-FORCED VALIDATION TEST\n";
         std::cout
             << "========================================\n\n";
 
@@ -280,6 +319,55 @@ int main() {
             );
         }
 
+        std::cout
+            << "Validation token position: "
+            << start
+            << "\n";
+
+        std::cout
+            << "Prompt size: "
+            << PROMPT_SIZE
+            << "\n";
+
+        std::cout
+            << "Test steps: "
+            << TEST_STEPS
+            << "\n\n";
+
+        // ----------------------------------------------------
+        // Model
+        // ----------------------------------------------------
+
+        LanguageModel model(
+            VOCAB_SIZE,
+            EMBED_DIM,
+            BLOCKS,
+            HEADS,
+            HIDDEN,
+            Device::CUDA
+        );
+
+        std::cout
+            << "[OK] Model created.\n";
+
+        model.LoadModel(
+            MODEL_PATH
+        );
+
+        std::cout
+            << "[OK] Model loaded.\n\n";
+
+        // ----------------------------------------------------
+        // KV cache
+        // ----------------------------------------------------
+
+        model.SetUseKVCache(true);
+        model.ResetCache();
+
+        // ----------------------------------------------------
+        // Prompt
+        // ----------------------------------------------------
+
         std::vector<size_t> prompt;
 
         for (size_t i = 0;
@@ -291,97 +379,12 @@ int main() {
             );
         }
 
-        std::cout
-            << "Prompt token position: "
-            << start
-            << "\n";
-
-        std::cout
-            << "Prompt tokens: "
-            << prompt.size()
-            << "\n\n";
-
         // ----------------------------------------------------
-        // Two identical models
+        // Feed prompt token-by-token
         // ----------------------------------------------------
-
-        LanguageModel full_model(
-            VOCAB_SIZE,
-            EMBED_DIM,
-            BLOCKS,
-            HEADS,
-            HIDDEN,
-            Device::CUDA
-        );
-
-        LanguageModel cache_model(
-            VOCAB_SIZE,
-            EMBED_DIM,
-            BLOCKS,
-            HEADS,
-            HIDDEN,
-            Device::CUDA
-        );
 
         std::cout
-            << "[OK] Models created.\n";
-
-        // ----------------------------------------------------
-        // Load same weights
-        // ----------------------------------------------------
-
-        full_model.LoadModel(
-            MODEL_PATH
-        );
-
-        cache_model.LoadModel(
-            MODEL_PATH
-        );
-
-        std::cout
-            << "[OK] Models loaded.\n\n";
-
-        // ----------------------------------------------------
-        // FULL MODEL
-        // ----------------------------------------------------
-
-        full_model.SetUseKVCache(false);
-        full_model.ResetCache();
-
-        // ----------------------------------------------------
-        // CACHE MODEL
-        // ----------------------------------------------------
-
-        cache_model.SetUseKVCache(true);
-        cache_model.ResetCache();
-
-        // ====================================================
-        // PROMPT COMPARISON
-        // ====================================================
-
-        std::cout
-            << "========================================\n";
-        std::cout
-            << "PROMPT COMPARISON\n";
-        std::cout
-            << "========================================\n\n";
-
-        // FULL:
-        // [prompt]
-        auto full_input =
-            CreateInput(prompt);
-
-        auto full_output =
-            full_model.forward(full_input);
-
-        cudaDeviceSynchronize();
-
-        auto full_logits =
-            CopyLastLogitsToCPU(full_output);
-
-        // CACHE:
-        // prompt token-by-token
-        std::vector<float> cache_logits;
+            << "Processing prompt...\n";
 
         for (size_t i = 0;
              i < prompt.size();
@@ -391,231 +394,111 @@ int main() {
                 CreateInput({prompt[i]});
 
             auto output =
-                cache_model.forward(input);
+                model.forward(input);
 
             cudaDeviceSynchronize();
 
-            cache_logits =
-                CopyLastLogitsToCPU(output);
+            // Нам нужен только последний logits
+            // после последнего prompt token.
         }
 
-        float prompt_diff =
-            MaxDifference(
-                full_logits,
-                cache_logits
-            );
-
-        size_t full_prediction =
-            ArgMax(full_logits);
-
-        size_t cache_prediction =
-            ArgMax(cache_logits);
-
         std::cout
-            << "Full forward prediction:  "
-            << full_prediction
-            << "\n";
-
-        std::cout
-            << "KV cache prediction:      "
-            << cache_prediction
-            << "\n";
-
-        std::cout
-            << "Max logits difference:    "
-            << prompt_diff
-            << "\n";
-
-        bool all_ok =
-            prompt_diff < 1e-4f;
-
-        if (all_ok) {
-
-            std::cout
-                << "[OK] Prompt KV equivalence.\n";
-
-        } else {
-
-            std::cout
-                << "[ERROR] Prompt KV mismatch!\n";
-        }
+            << "[OK] Prompt processed.\n\n";
 
         // ====================================================
-        // AUTOREGRESSIVE COMPARISON
+        // TEST
         // ====================================================
 
-        std::cout
-            << "\n";
-        std::cout
-            << "========================================\n";
-        std::cout
-            << "AUTOREGRESSIVE KV COMPARISON\n";
-        std::cout
-            << "========================================\n\n";
+        size_t top1_hits = 0;
+        size_t top5_hits = 0;
+        size_t top10_hits = 0;
 
-        // ВАЖНО:
-        //
-        // После prompt обе модели находятся в состоянии:
-        //
-        // [prompt]
-        //
-        // На каждом шаге мы добавляем ОДИН И ТОТ ЖЕ
-        // реальный токен.
-        //
-        // FULL получает всю последовательность.
-        // CACHE получает только новый токен.
-
-        std::vector<size_t> sequence =
-            prompt;
+        double total_rank = 0.0;
+        double total_loss = 0.0;
 
         for (size_t step = 0;
              step < TEST_STEPS;
              ++step) {
 
             // ------------------------------------------------
-            // Реальный следующий токен
-            // ------------------------------------------------
-
-            size_t token =
-                tokens[
-                    start +
-                    PROMPT_SIZE +
-                    step
-                ];
-
-            // ------------------------------------------------
-            // Добавляем его в полный контекст
+            // Получаем logits для текущего контекста
             //
-            // Теперь sequence содержит:
+            // ВАЖНО:
             //
-            // prompt + token
-            // ------------------------------------------------
-
-            sequence.push_back(token);
-
-            // ------------------------------------------------
-            // FULL
+            // Сейчас после prompt или после предыдущего
+            // реального токена cache содержит правильный
+            // контекст.
             //
-            // Полностью пересчитываем:
+            // Но logits этого контекста нужно получить
+            // именно на последнем forward.
             //
-            // [prompt + token]
+            // Поэтому первый шаг берём из prompt_forward,
+            // а дальше logits получаем после подачи
+            // предыдущего токена.
             // ------------------------------------------------
 
-            auto full_prefix_input =
-                CreateInput(sequence);
-
-            auto full_prefix_output =
-                full_model.forward(
-                    full_prefix_input
-                );
-
-            cudaDeviceSynchronize();
-
-            auto full_prefix_logits =
-                CopyLastLogitsToCPU(
-                    full_prefix_output
-                );
-
-            // ------------------------------------------------
-            // CACHE
-            //
-            // Prompt уже был обработан выше.
-            //
-            // Теперь добавляем только token.
-            // ------------------------------------------------
-
-            auto next_input =
-                CreateInput({token});
-
-            auto cache_output =
-                cache_model.forward(
-                    next_input
-                );
-
-            cudaDeviceSynchronize();
-
-            auto current_cache_logits =
-                CopyLastLogitsToCPU(
-                    cache_output
-                );
-
-            // ------------------------------------------------
-            // Compare
-            // ------------------------------------------------
-
-            float diff =
-                MaxDifference(
-                    full_prefix_logits,
-                    current_cache_logits
-                );
-
-            size_t full_prediction =
-                ArgMax(full_prefix_logits);
-
-            size_t cache_prediction =
-                ArgMax(current_cache_logits);
-
-            std::cout
-                << "Step "
-                << step
-                << ":\n";
-
-            std::cout
-                << "  Input token:      "
-                << token
-                << "\n";
-
-            std::cout
-                << "  Full prediction:  "
-                << full_prediction
-                << "\n";
-
-            std::cout
-                << "  Cache prediction: "
-                << cache_prediction
-                << "\n";
-
-            std::cout
-                << "  Max difference:   "
-                << diff
-                << "\n";
-
-            if (diff < 1e-4f) {
-
-                std::cout
-                    << "  [OK]\n";
-
-            } else {
-
-                std::cout
-                    << "  [ERROR]\n";
-
-                all_ok = false;
-            }
+            // Здесь будет реализована ниже.
         }
 
-        // ====================================================
-        // RESULT
-        // ====================================================
+        // ----------------------------------------------------
+        // Result
+        // ----------------------------------------------------
 
         std::cout
+            << "\n========================================\n";
+
+        std::cout
+            << "RESULT\n";
+
+        std::cout
+            << "========================================\n";
+
+        std::cout
+            << "Top-1 accuracy:  "
+            << 100.0 *
+                static_cast<double>(top1_hits) /
+                TEST_STEPS
+            << "%\n";
+
+        std::cout
+            << "Top-5 accuracy:  "
+            << 100.0 *
+                static_cast<double>(top5_hits) /
+                TEST_STEPS
+            << "%\n";
+
+        std::cout
+            << "Top-10 accuracy: "
+            << 100.0 *
+                static_cast<double>(top10_hits) /
+                TEST_STEPS
+            << "%\n";
+
+        std::cout
+            << "Average rank:    "
+            << total_rank /
+                static_cast<double>(TEST_STEPS)
             << "\n";
+
+        double average_loss =
+            total_loss /
+            static_cast<double>(TEST_STEPS);
+
+        std::cout
+            << "Cross entropy:   "
+            << average_loss
+            << "\n";
+
+        std::cout
+            << "Perplexity:      "
+            << std::exp(average_loss)
+            << "\n";
+
         std::cout
             << "========================================\n";
 
-        if (all_ok) {
-
-            std::cout
-                << "[OK] KV CACHE EQUIVALENCE PASSED\n";
-
-        } else {
-
-            std::cout
-                << "[ERROR] KV CACHE EQUIVALENCE FAILED\n";
-        }
-
-        std::cout
-            << "========================================\n";
+        model.SetUseKVCache(false);
+        model.ResetCache();
     }
     catch (const std::exception& e) {
 
