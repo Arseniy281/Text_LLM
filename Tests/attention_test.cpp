@@ -13,6 +13,7 @@
 #include <random>
 #include <iomanip>
 #include <stdexcept>
+#include <filesystem>
 
 // ============================================================
 // Настройки
@@ -28,7 +29,7 @@ const size_t HIDDEN = 512;
 const size_t CONTEXT = 128;
 
 const size_t BATCH_SIZE = 8;
-const size_t STEPS = 50000;
+const size_t STEPS = 20000;
 
 const float LR = 0.001f;
 
@@ -36,7 +37,7 @@ const std::string DATA_PATH =
     "../Data/master_and_margarita.txt";
 
 const std::string TOKENIZER_PATH =
-    "../Models/MargaritaCUDA/step_5000/MargaritaTokinizer";
+    "../Models//MargaritaTokenizer";
 
 // ============================================================
 // CUDA scalar -> CPU
@@ -162,6 +163,17 @@ int main() {
 
         std::vector<size_t> tokens =
             tokenizer.Encode(text);
+
+        std::filesystem::create_directories("../Models");
+
+        tokenizer.Save(
+            TOKENIZER_PATH
+        );
+
+        std::cout
+            << "Tokenizer saved to: "
+            << TOKENIZER_PATH
+            << "\n";
 
         std::cout
             << "Tokens: "
@@ -486,7 +498,16 @@ int main() {
             << "========================================\n";
 
 
-        const std::string MODEL_PATH = "../Models/MargaritaCUDA/step_5000";
+        const std::string MODEL_PATH =
+            "../Models/MargaritaCUDA/step_20000";
+
+        std::filesystem::create_directories(
+            "../Models/MargaritaCUDA"
+        );
+
+        model.SaveModel(
+            MODEL_PATH
+        );
 
         std::cout
 
