@@ -29,9 +29,9 @@ const size_t HIDDEN = 512;
 const size_t CONTEXT = 128;
 const size_t BATCH_SIZE = 8;
 
-const size_t STEPS = 5000;
+const size_t STEPS = 10000;
 
-const float LR = 0.001f;
+const float LR = 0.0003f;
 
 const size_t VALIDATION_EVERY = 100;
 const size_t VALIDATION_BATCHES = 20;
@@ -45,7 +45,7 @@ const std::string TOKENIZER_PATH =
     "../Models/MargaritaTokenizer";
 
 const std::string MODEL_PATH =
-    "../Models/MargaritaConstantLR_best";
+    "../Models/MargaritaConstantLR_10k_best";
 
 // ============================================================
 // CUDA scalar -> CPU
