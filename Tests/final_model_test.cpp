@@ -10,6 +10,10 @@
 #include <string>
 #include <stdexcept>
 #include <filesystem>
+#include <fstream>
+#include <random>
+#include <cmath>
+#include <algorithm>
 
 // ============================================================
 // Настройки
@@ -22,89 +26,44 @@ const size_t BLOCKS = 4;
 const size_t HEADS = 4;
 const size_t HIDDEN = 512;
 
-const size_t GENERATION_LENGTH = 100;
+const size_t CONTEXT = 128;
 
-const float TOP_P = 0.9f;
+const size_t PROMPT_SIZE = 32;
+const size_t TEST_STEPS = 200;
 
-const std::vector<float> TEMPERATURES = {
-    0.7f,
-    0.8f,
-    1.0f,
-    1.2f
-};
+const size_t VALIDATION_BATCHES = 20;
+
+const size_t VALIDATION_OFFSET = 0;
+
+const unsigned int SEED = 42;
 
 const std::string TOKENIZER_PATH =
     "/content/Text_LLM/Models/MargaritaTokenizer";
 
 const std::string MODEL_PATH =
-    "../Models/MargaritaConstantLR_best";
+    "/content/Text_LLM/Models/MargaritaConstantLR_best";
 
-const std::string PROMPT =
-    "The Master and Margarita";
-
-// ============================================================
-// Print generated text
-// ============================================================
-
-void PrintText(
-    const std::string& prompt,
-    const std::vector<size_t>& generated,
-    BPETokenizer& tokenizer,
-    float temperature
-) {
-    std::string generated_text =
-        tokenizer.Decode(generated);
-
-    std::cout
-        << "\n========================================\n"
-        << "Temperature: "
-        << temperature
-        << "\n"
-        << "========================================\n";
-
-    std::cout
-        << generated_text
-        << "\n";
-
-    std::cout
-        << "\nGenerated tokens: "
-        << generated.size()
-        << "\n";
-}
+const std::string CORPUS_PATH =
+    "/content/Text_LLM/Data/master_and_margarita.txt";
 
 // ============================================================
-// Encode prompt
+// Load text
 // ============================================================
 
-std::vector<size_t> EncodePrompt(
-    BPETokenizer& tokenizer,
-    const std::string& prompt
-) {
-    std::vector<size_t> tokens =
-        tokenizer.Encode(prompt);
+std::string LoadText(const std::string& path) {
 
-    if (tokens.empty()) {
+    std::ifstream file(path);
+
+    if (!file) {
         throw std::runtime_error(
-            "Prompt produced no tokens"
+            "Cannot open corpus: " + path
         );
     }
 
-    for (size_t token : tokens) {
-
-        if (token >= tokenizer.GetVocabSize()) {
-
-            throw std::runtime_error(
-                "Prompt contains invalid token id"
-            );
-        }
-    }
-
-    std::cout
-        << "Prompt tokens: "
-        << tokens.size()
-        << "\n";
-
-    return tokens;
+    return std::string(
+        std::istreambuf_iterator<char>(file),
+        std::istreambuf_iterator<char>()
+    );
 }
 
 // ============================================================
@@ -117,7 +76,7 @@ int main() {
 
         std::cout
             << "========================================\n"
-            << "       MARGARITA CUDA SAMPLING TEST\n"
+            << "       MARGARITA TEACHER RANK TEST\n"
             << "========================================\n\n";
 
         // ----------------------------------------------------
@@ -139,13 +98,7 @@ int main() {
             );
         }
 
-        std::cout
-            << "CUDA devices: "
-            << device_count
-            << "\n";
-
         if (device_count == 0) {
-
             throw std::runtime_error(
                 "No CUDA devices found"
             );
@@ -159,65 +112,24 @@ int main() {
         );
 
         std::cout
+            << "CUDA devices: "
+            << device_count
+            << "\n";
+
+        std::cout
             << "GPU: "
             << properties.name
             << "\n\n";
 
         // ----------------------------------------------------
-        // Check files
-        // ----------------------------------------------------
-
-        std::cout
-            << "========================================\n"
-            << "          CHECKING FILES\n"
-            << "========================================\n";
-
-        if (!std::filesystem::exists(
-                TOKENIZER_PATH)) {
-
-            throw std::runtime_error(
-                "Tokenizer not found: " +
-                TOKENIZER_PATH
-            );
-        }
-
-        if (!std::filesystem::exists(
-                MODEL_PATH)) {
-
-            throw std::runtime_error(
-                "Model not found: " +
-                MODEL_PATH
-            );
-        }
-
-        std::cout
-            << "[OK] Tokenizer found.\n";
-
-        std::cout
-            << "[OK] Model found.\n\n";
-
-        // ----------------------------------------------------
         // Load tokenizer
         // ----------------------------------------------------
-
-        std::cout
-            << "========================================\n"
-            << "        LOADING TOKENIZER\n"
-            << "========================================\n";
 
         BPETokenizer tokenizer;
 
         tokenizer.Load(
             TOKENIZER_PATH
         );
-
-        std::cout
-            << "[OK] Tokenizer loaded.\n";
-
-        std::cout
-            << "Vocabulary size: "
-            << tokenizer.GetVocabSize()
-            << "\n";
 
         if (tokenizer.GetVocabSize() !=
             VOCAB_SIZE) {
@@ -228,14 +140,56 @@ int main() {
             );
         }
 
+        std::cout
+            << "[OK] Tokenizer loaded.\n";
+
+        // ----------------------------------------------------
+        // Load corpus
+        // ----------------------------------------------------
+
+        std::string text =
+            LoadText(CORPUS_PATH);
+
+        std::vector<size_t> tokens =
+            tokenizer.Encode(text);
+
+        std::cout
+            << "[OK] Corpus encoded.\n";
+
+        std::cout
+            << "Tokens: "
+            << tokens.size()
+            << "\n";
+
+        // ----------------------------------------------------
+        // Validation split
+        // ----------------------------------------------------
+
+        size_t train_size =
+            static_cast<size_t>(
+                tokens.size() * 0.9
+            );
+
+        size_t validation_start =
+            train_size;
+
+        size_t validation_size =
+            tokens.size() -
+            validation_start;
+
+        std::cout
+            << "Train tokens: "
+            << train_size
+            << "\n";
+
+        std::cout
+            << "Validation tokens: "
+            << validation_size
+            << "\n";
+
         // ----------------------------------------------------
         // Create model
         // ----------------------------------------------------
-
-        std::cout
-            << "\n========================================\n"
-            << "          CREATING MODEL\n"
-            << "========================================\n";
 
         LanguageModel model(
             VOCAB_SIZE,
@@ -250,16 +204,11 @@ int main() {
             << "[OK] CUDA model created.\n";
 
         // ----------------------------------------------------
-        // Load model
+        // Load best checkpoint
         // ----------------------------------------------------
 
         std::cout
-            << "\n========================================\n"
-            << "           LOADING MODEL\n"
-            << "========================================\n";
-
-        std::cout
-            << "Path:\n"
+            << "\nLoading model:\n"
             << MODEL_PATH
             << "\n";
 
@@ -273,135 +222,314 @@ int main() {
             << "[OK] Model loaded.\n";
 
         // ----------------------------------------------------
-        // Encode prompt
+        // Teacher-forced evaluation
         // ----------------------------------------------------
 
-        std::cout
-            << "\n========================================\n"
-            << "          ENCODING PROMPT\n"
-            << "========================================\n";
+        std::mt19937 rng(SEED);
 
-        std::cout
-            << "Prompt:\n"
-            << PROMPT
-            << "\n";
-
-        std::vector<size_t> tokens =
-            EncodePrompt(
-                tokenizer,
-                PROMPT
+        std::uniform_int_distribution<size_t>
+            distribution(
+                validation_start,
+                tokens.size() - CONTEXT - 1
             );
 
-        // ----------------------------------------------------
-        // Generation
-        // ----------------------------------------------------
+        double total_loss = 0.0;
 
-        std::cout
-            << "\n========================================\n"
-            << "            GENERATION\n"
-            << "========================================\n";
+        size_t total_tokens = 0;
 
-        std::cout
-            << "Tokens to generate: "
-            << GENERATION_LENGTH
-            << "\n";
+        size_t top1 = 0;
+        size_t top5 = 0;
+        size_t top10 = 0;
 
-        std::cout
-            << "Top-p: "
-            << TOP_P
-            << "\n";
+        double total_rank = 0.0;
 
-        std::cout
-            << "Temperatures: ";
+        model.SetUseKVCache(false);
 
-        for (float temperature : TEMPERATURES) {
+        for (size_t batch = 0;
+             batch < VALIDATION_BATCHES;
+             ++batch) {
 
-            std::cout
-                << temperature
-                << " ";
-        }
+            std::vector<size_t> input_data(
+                CONTEXT
+            );
 
-        std::cout
-            << "\n";
+            std::vector<size_t> target_data(
+                CONTEXT
+            );
 
-        // ----------------------------------------------------
-        // Run all sampling tests
-        // ----------------------------------------------------
+            size_t start =
+                distribution(rng);
 
-        for (float temperature : TEMPERATURES) {
+            for (size_t i = 0;
+                 i < CONTEXT;
+                 ++i) {
 
-            std::cout
-                << "\n----------------------------------------\n"
-                << "Generating with temperature = "
-                << temperature
-                << "\n"
-                << "----------------------------------------\n";
+                input_data[i] =
+                    tokens[start + i];
 
-            // На всякий случай очищаем KV cache
-            // перед каждой независимой генерацией.
-            model.ResetCache();
-
-            std::vector<size_t> generated =
-                model.generate(
-                    tokens,
-                    GENERATION_LENGTH,
-                    temperature,
-                    TOP_P,
-                    -1
-                );
-
-            cudaDeviceSynchronize();
-
-            // ------------------------------------------------
-            // Validation
-            // ------------------------------------------------
-
-            if (generated.size() !=
-                GENERATION_LENGTH) {
-
-                throw std::runtime_error(
-                    "Generation returned unexpected "
-                    "number of tokens"
-                );
+                target_data[i] =
+                    tokens[start + i + 1];
             }
 
-            for (size_t token : generated) {
+            Tensor input(
+                {1, CONTEXT},
+                0.0f,
+                Device::CUDA
+            );
 
-                if (token >= VOCAB_SIZE) {
+            Tensor target(
+                {1, CONTEXT},
+                0.0f,
+                Device::CUDA
+            );
 
-                    throw std::runtime_error(
-                        "Generated invalid token id"
+            Tensor input_cpu(
+                {1, CONTEXT},
+                0.0f,
+                Device::CPU
+            );
+
+            Tensor target_cpu(
+                {1, CONTEXT},
+                0.0f,
+                Device::CPU
+            );
+
+            for (size_t i = 0;
+                 i < CONTEXT;
+                 ++i) {
+
+                input_cpu.Data()[i] =
+                    static_cast<float>(
+                        input_data[i]
                     );
-                }
+
+                target_cpu.Data()[i] =
+                    static_cast<float>(
+                        target_data[i]
+                    );
             }
 
-            std::cout
-                << "[OK] Generated token count is correct.\n";
+            input_cpu.CopyToCUDA(input);
+            target_cpu.CopyToCUDA(target);
 
-            std::cout
-                << "[OK] All generated token ids are valid.\n";
+            model.ClearGrad();
+
+            Tensor logits =
+                model.forward(input);
 
             // ------------------------------------------------
-            // Print
+            // Last-token predictions
             // ------------------------------------------------
 
-            PrintText(
-                PROMPT,
-                generated,
-                tokenizer,
-                temperature
+            Tensor logits_cpu(
+                logits.GetShape(),
+                0.0f,
+                Device::CPU
             );
+
+            cudaMemcpy(
+                logits_cpu.Data(),
+                logits.Data(),
+                logits.GetSize() * sizeof(float),
+                cudaMemcpyDeviceToHost
+            );
+
+            const auto& shape =
+                logits.GetShape();
+
+            size_t sequence_length =
+                shape[1];
+
+            size_t vocab_size =
+                shape[2];
+
+            for (size_t pos = 0;
+                 pos < sequence_length;
+                 ++pos) {
+
+                size_t target_token =
+                    target_data[pos];
+
+                std::vector<float> values(
+                    vocab_size
+                );
+
+                for (size_t v = 0;
+                     v < vocab_size;
+                     ++v) {
+
+                    values[v] =
+                        logits_cpu.Data()[
+                            pos * vocab_size + v
+                        ];
+                }
+
+                // --------------------------------------------
+                // Cross entropy
+                // --------------------------------------------
+
+                float max_logit =
+                    *std::max_element(
+                        values.begin(),
+                        values.end()
+                    );
+
+                double sum_exp = 0.0;
+
+                for (float value : values) {
+
+                    sum_exp +=
+                        std::exp(
+                            static_cast<double>(
+                                value - max_logit
+                            )
+                        );
+                }
+
+                double log_sum_exp =
+                    static_cast<double>(
+                        max_logit
+                    ) +
+                    std::log(sum_exp);
+
+                double loss =
+                    log_sum_exp -
+                    static_cast<double>(
+                        values[target_token]
+                    );
+
+                total_loss += loss;
+
+                // --------------------------------------------
+                // Rank
+                // --------------------------------------------
+
+                float target_logit =
+                    values[target_token];
+
+                size_t rank = 1;
+
+                for (float value : values) {
+
+                    if (value > target_logit) {
+                        ++rank;
+                    }
+                }
+
+                total_rank +=
+                    static_cast<double>(rank);
+
+                if (rank == 1) {
+                    ++top1;
+                }
+
+                if (rank <= 5) {
+                    ++top5;
+                }
+
+                if (rank <= 10) {
+                    ++top10;
+                }
+
+                ++total_tokens;
+            }
+
+            if ((batch + 1) % 5 == 0) {
+
+                double ce =
+                    total_loss /
+                    static_cast<double>(
+                        total_tokens
+                    );
+
+                std::cout
+                    << "Batch "
+                    << (batch + 1)
+                    << "/"
+                    << VALIDATION_BATCHES
+                    << " | CE: "
+                    << ce
+                    << "\n";
+            }
         }
 
         // ----------------------------------------------------
-        // Result
+        // Results
         // ----------------------------------------------------
+
+        double cross_entropy =
+            total_loss /
+            static_cast<double>(
+                total_tokens
+            );
+
+        double perplexity =
+            std::exp(cross_entropy);
+
+        double top1_accuracy =
+            100.0 *
+            static_cast<double>(top1) /
+            static_cast<double>(total_tokens);
+
+        double top5_accuracy =
+            100.0 *
+            static_cast<double>(top5) /
+            static_cast<double>(total_tokens);
+
+        double top10_accuracy =
+            100.0 *
+            static_cast<double>(top10) /
+            static_cast<double>(total_tokens);
+
+        double average_rank =
+            total_rank /
+            static_cast<double>(total_tokens);
 
         std::cout
             << "\n========================================\n"
-            << "       SAMPLING TEST PASSED\n"
+            << "                RESULTS\n"
             << "========================================\n";
 
+        std::cout
+            << "Tokens tested: "
+            << total_tokens
+            << "\n";
+
+        std::cout
+            << "Top-1 accuracy: "
+            << top1_accuracy
+            << "%\n";
+
+        std::cout
+            << "Top-5 accuracy: "
+            << top5_accuracy
+            << "%\n";
+
+        std::cout
+            << "Top-10 accuracy: "
+            << top10_accuracy
+            << "%\n";
+
+        std::cout
+            << "Average rank: "
+            << average_rank
+            << "\n";
+
+        std::cout
+            << "Cross entropy: "
+            << cross_entropy
+            << "\n";
+
+        std::cout
+            << "Perplexity: "
+            << perplexity
+            << "\n";
+
+        std::cout
+            << "\n========================================\n"
+            << "       TEACHER RANK TEST PASSED\n"
+            << "========================================\n";
     }
     catch (const std::exception& exception) {
 
