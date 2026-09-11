@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -255,7 +256,7 @@ int main() {
             << "\n\n";
 
         // ----------------------------------------------------
-        // Берём тот же validation region
+        // Validation region
         // ----------------------------------------------------
 
         size_t train_size =
@@ -266,12 +267,12 @@ int main() {
         size_t validation_start =
             train_size;
 
-        // Используем тот же offset,
-        // который был в предыдущем тесте.
         size_t start =
             validation_start + 14136;
 
-        if (start + PROMPT_SIZE >=
+        if (start +
+                PROMPT_SIZE +
+                TEST_STEPS >=
             tokens.size()) {
 
             throw std::runtime_error(
@@ -301,7 +302,7 @@ int main() {
             << "\n\n";
 
         // ----------------------------------------------------
-        // Создаём ДВЕ одинаковые модели
+        // Two identical models
         // ----------------------------------------------------
 
         LanguageModel full_model(
@@ -326,7 +327,7 @@ int main() {
             << "[OK] Models created.\n";
 
         // ----------------------------------------------------
-        // Загружаем одинаковые веса
+        // Load same weights
         // ----------------------------------------------------
 
         full_model.LoadModel(
@@ -354,9 +355,9 @@ int main() {
         cache_model.SetUseKVCache(true);
         cache_model.ResetCache();
 
-        // ----------------------------------------------------
-        // Сначала сравниваем весь prompt
-        // ----------------------------------------------------
+        // ====================================================
+        // PROMPT COMPARISON
+        // ====================================================
 
         std::cout
             << "========================================\n";
@@ -365,6 +366,8 @@ int main() {
         std::cout
             << "========================================\n\n";
 
+        // FULL:
+        // [prompt]
         auto full_input =
             CreateInput(prompt);
 
@@ -376,21 +379,16 @@ int main() {
         auto full_logits =
             CopyLastLogitsToCPU(full_output);
 
+        // CACHE:
+        // prompt token-by-token
         std::vector<float> cache_logits;
-
-        // Подаём prompt в cache model
-        // по одному токену.
 
         for (size_t i = 0;
              i < prompt.size();
              ++i) {
 
-            std::vector<size_t> one_token = {
-                prompt[i]
-            };
-
             auto input =
-                CreateInput(one_token);
+                CreateInput({prompt[i]});
 
             auto output =
                 cache_model.forward(input);
@@ -428,7 +426,10 @@ int main() {
             << prompt_diff
             << "\n";
 
-        if (prompt_diff < 1e-4f) {
+        bool all_ok =
+            prompt_diff < 1e-4f;
+
+        if (all_ok) {
 
             std::cout
                 << "[OK] Prompt KV equivalence.\n";
@@ -439,9 +440,9 @@ int main() {
                 << "[ERROR] Prompt KV mismatch!\n";
         }
 
-        // ----------------------------------------------------
-        // Теперь добавляем токены
-        // ----------------------------------------------------
+        // ====================================================
+        // AUTOREGRESSIVE COMPARISON
+        // ====================================================
 
         std::cout
             << "\n";
@@ -452,17 +453,52 @@ int main() {
         std::cout
             << "========================================\n\n";
 
+        // ВАЖНО:
+        //
+        // После prompt обе модели находятся в состоянии:
+        //
+        // [prompt]
+        //
+        // На каждом шаге мы добавляем ОДИН И ТОТ ЖЕ
+        // реальный токен.
+        //
+        // FULL получает всю последовательность.
+        // CACHE получает только новый токен.
+
         std::vector<size_t> sequence =
             prompt;
-
-        bool all_ok = true;
 
         for (size_t step = 0;
              step < TEST_STEPS;
              ++step) {
 
             // ------------------------------------------------
-            // FULL PREFIX
+            // Реальный следующий токен
+            // ------------------------------------------------
+
+            size_t token =
+                tokens[
+                    start +
+                    PROMPT_SIZE +
+                    step
+                ];
+
+            // ------------------------------------------------
+            // Добавляем его в полный контекст
+            //
+            // Теперь sequence содержит:
+            //
+            // prompt + token
+            // ------------------------------------------------
+
+            sequence.push_back(token);
+
+            // ------------------------------------------------
+            // FULL
+            //
+            // Полностью пересчитываем:
+            //
+            // [prompt + token]
             // ------------------------------------------------
 
             auto full_prefix_input =
@@ -483,16 +519,10 @@ int main() {
             // ------------------------------------------------
             // CACHE
             //
-            // Здесь cache_model уже содержит prompt.
-            // Поэтому подаём только новый токен.
+            // Prompt уже был обработан выше.
+            //
+            // Теперь добавляем только token.
             // ------------------------------------------------
-
-            size_t token =
-                tokens[
-                    start +
-                    PROMPT_SIZE +
-                    step
-                ];
 
             auto next_input =
                 CreateInput({token});
@@ -562,24 +592,18 @@ int main() {
 
                 all_ok = false;
             }
-
-            // Добавляем тот же настоящий токен
-            // в sequence для следующего full forward.
-
-            sequence.push_back(token);
         }
 
-        // ----------------------------------------------------
+        // ====================================================
         // RESULT
-        // ----------------------------------------------------
+        // ====================================================
 
         std::cout
             << "\n";
         std::cout
             << "========================================\n";
 
-        if (all_ok &&
-            prompt_diff < 1e-4f) {
+        if (all_ok) {
 
             std::cout
                 << "[OK] KV CACHE EQUIVALENCE PASSED\n";
