@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -35,12 +36,16 @@ const size_t HIDDEN = 512;
 const size_t PROMPT_SIZE = 32;
 const size_t TEST_STEPS = 50;
 
+// Та же позиция, что и в предыдущем тесте.
+const size_t VALIDATION_OFFSET = 14136;
+
 // ============================================================
 // Read file
 // ============================================================
 
-std::string ReadFile(const std::string& path) {
-
+std::string ReadFile(
+    const std::string& path
+) {
     std::ifstream file(path);
 
     if (!file) {
@@ -56,58 +61,10 @@ std::string ReadFile(const std::string& path) {
 }
 
 // ============================================================
-// CUDA logits -> CPU
-// ============================================================
-
-std::vector<float> CopyLastLogitsToCPU(
-    const std::shared_ptr<Tensor>& logits
-) {
-    const auto& shape =
-        logits->GetShape();
-
-    if (shape.size() != 3) {
-        throw std::runtime_error(
-            "Expected logits rank 3"
-        );
-    }
-
-    if (shape[0] != 1) {
-        throw std::runtime_error(
-            "Expected batch size 1"
-        );
-    }
-
-    size_t seq_len = shape[1];
-    size_t vocab = shape[2];
-
-    std::vector<float> result(vocab);
-
-    size_t offset =
-        (seq_len - 1) * vocab;
-
-    cudaError_t error = cudaMemcpy(
-        result.data(),
-        logits->Data() + offset,
-        vocab * sizeof(float),
-        cudaMemcpyDeviceToHost
-    );
-
-    if (error != cudaSuccess) {
-        throw std::runtime_error(
-            std::string("cudaMemcpy failed: ") +
-            cudaGetErrorString(error)
-        );
-    }
-
-    return result;
-}
-
-// ============================================================
 // Create CUDA input
 //
 // Shape:
 // [1, seq]
-//
 // ============================================================
 
 std::shared_ptr<Tensor> CreateInput(
@@ -147,6 +104,64 @@ std::shared_ptr<Tensor> CreateInput(
 }
 
 // ============================================================
+// CUDA logits -> CPU
+// ============================================================
+
+std::vector<float> CopyLastLogitsToCPU(
+    const std::shared_ptr<Tensor>& logits
+) {
+    const auto& shape =
+        logits->GetShape();
+
+    if (shape.size() != 3) {
+        throw std::runtime_error(
+            "Expected logits rank 3"
+        );
+    }
+
+    if (shape[0] != 1) {
+        throw std::runtime_error(
+            "Expected batch size 1"
+        );
+    }
+
+    size_t seq_len = shape[1];
+    size_t vocab_size = shape[2];
+
+    if (vocab_size != VOCAB_SIZE) {
+        throw std::runtime_error(
+            "Unexpected vocabulary size"
+        );
+    }
+
+    std::vector<float> result(
+        vocab_size
+    );
+
+    size_t offset =
+        (seq_len - 1) * vocab_size;
+
+    cudaError_t error =
+        cudaMemcpy(
+            result.data(),
+            logits->Data() + offset,
+            vocab_size * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string(
+                "cudaMemcpy failed: "
+            ) +
+            cudaGetErrorString(error)
+        );
+    }
+
+    return result;
+}
+
+// ============================================================
 // ArgMax
 // ============================================================
 
@@ -168,6 +183,80 @@ size_t ArgMax(
 }
 
 // ============================================================
+// Softmax
+//
+// Делается на CPU только для анализа.
+// ============================================================
+
+std::vector<float> Softmax(
+    const std::vector<float>& logits
+) {
+    std::vector<float> probs(
+        logits.size()
+    );
+
+    float max_logit =
+        *std::max_element(
+            logits.begin(),
+            logits.end()
+        );
+
+    double sum = 0.0;
+
+    for (size_t i = 0;
+         i < logits.size();
+         ++i) {
+
+        probs[i] =
+            std::exp(
+                logits[i] - max_logit
+            );
+
+        sum += probs[i];
+    }
+
+    for (size_t i = 0;
+         i < probs.size();
+         ++i) {
+
+        probs[i] =
+            static_cast<float>(
+                probs[i] / sum
+            );
+    }
+
+    return probs;
+}
+
+// ============================================================
+// Rank настоящего токена
+//
+// Rank 1 = лучший токен.
+// Rank 2 = второй лучший и т.д.
+// ============================================================
+
+size_t GetRank(
+    const std::vector<float>& logits,
+    size_t target
+) {
+    float target_value =
+        logits[target];
+
+    size_t rank = 1;
+
+    for (size_t i = 0;
+         i < logits.size();
+         ++i) {
+
+        if (logits[i] > target_value) {
+            ++rank;
+        }
+    }
+
+    return rank;
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -178,7 +267,7 @@ int main() {
         std::cout
             << "========================================\n";
         std::cout
-            << "GREEDY VS TEACHER-FORCED TEST\n";
+            << "TEACHER-FORCED TOKEN RANK TEST\n";
         std::cout
             << "========================================\n\n";
 
@@ -257,7 +346,8 @@ int main() {
             train_size;
 
         size_t start =
-            validation_start + 14136;
+            validation_start +
+            VALIDATION_OFFSET;
 
         if (start +
                 PROMPT_SIZE +
@@ -284,28 +374,11 @@ int main() {
             << TEST_STEPS
             << "\n\n";
 
-        // ====================================================
-        // Create TWO identical models
-        //
-        // Teacher model:
-        // uses real previous tokens.
-        //
-        // Greedy model:
-        // uses its own predictions.
-        //
-        // They must have identical weights.
-        // ====================================================
+        // ----------------------------------------------------
+        // Model
+        // ----------------------------------------------------
 
-        LanguageModel teacher_model(
-            VOCAB_SIZE,
-            EMBED_DIM,
-            BLOCKS,
-            HEADS,
-            HIDDEN,
-            Device::CUDA
-        );
-
-        LanguageModel greedy_model(
+        LanguageModel model(
             VOCAB_SIZE,
             EMBED_DIM,
             BLOCKS,
@@ -315,190 +388,86 @@ int main() {
         );
 
         std::cout
-            << "[OK] Models created.\n";
+            << "[OK] Model created.\n";
 
-        teacher_model.LoadModel(
-            MODEL_PATH
-        );
-
-        greedy_model.LoadModel(
+        model.LoadModel(
             MODEL_PATH
         );
 
         std::cout
-            << "[OK] Models loaded.\n\n";
+            << "[OK] Model loaded.\n";
 
         // ----------------------------------------------------
-        // Enable KV cache
+        // KV cache
+        //
+        // Используем тот же режим, что и при генерации.
         // ----------------------------------------------------
 
-        teacher_model.SetUseKVCache(true);
-        greedy_model.SetUseKVCache(true);
-
-        teacher_model.ResetCache();
-        greedy_model.ResetCache();
+        model.SetUseKVCache(true);
+        model.ResetCache();
 
         // ====================================================
-        // Prompt
+        // Feed prompt
         // ====================================================
 
-        std::vector<size_t> prompt;
+        std::cout
+            << "\nFeeding prompt...\n";
 
         for (size_t i = 0;
              i < PROMPT_SIZE;
              ++i) {
 
-            prompt.push_back(
-                tokens[start + i]
-            );
-        }
+            size_t token =
+                tokens[start + i];
 
-        // ====================================================
-        // Initialize both models with the same prompt
-        // ====================================================
-
-        std::vector<float> teacher_logits;
-        std::vector<float> greedy_logits;
-
-        for (size_t i = 0;
-             i < prompt.size();
-             ++i) {
-
-            auto teacher_input =
+            auto input =
                 CreateInput({
-                    prompt[i]
+                    token
                 });
 
-            auto greedy_input =
-                CreateInput({
-                    prompt[i]
-                });
-
-            auto teacher_output =
-                teacher_model.forward(
-                    teacher_input
-                );
-
-            auto greedy_output =
-                greedy_model.forward(
-                    greedy_input
-                );
+            model.forward(input);
 
             cudaDeviceSynchronize();
-
-            if (i + 1 == prompt.size()) {
-
-                teacher_logits =
-                    CopyLastLogitsToCPU(
-                        teacher_output
-                    );
-
-                greedy_logits =
-                    CopyLastLogitsToCPU(
-                        greedy_output
-                    );
-            }
-        }
-
-        // ----------------------------------------------------
-        // Check that both models agree after prompt
-        // ----------------------------------------------------
-
-        size_t teacher_first =
-            ArgMax(teacher_logits);
-
-        size_t greedy_first =
-            ArgMax(greedy_logits);
-
-        float max_difference = 0.0f;
-
-        for (size_t i = 0;
-             i < teacher_logits.size();
-             ++i) {
-
-            max_difference =
-                std::max(
-                    max_difference,
-                    std::abs(
-                        teacher_logits[i] -
-                        greedy_logits[i]
-                    )
-                );
         }
 
         std::cout
-            << "========================================\n";
-        std::cout
-            << "PROMPT COMPARISON\n";
-        std::cout
-            << "========================================\n\n";
-
-        std::cout
-            << "Teacher prediction: "
-            << teacher_first
-            << "\n";
-
-        std::cout
-            << "Greedy prediction:  "
-            << greedy_first
-            << "\n";
-
-        std::cout
-            << "Max logits difference: "
-            << max_difference
-            << "\n\n";
-
-        if (teacher_first != greedy_first) {
-
-            throw std::runtime_error(
-                "Models disagree after identical prompt"
-            );
-        }
-
-        if (max_difference > 1e-4f) {
-
-            throw std::runtime_error(
-                "Model outputs differ after identical prompt"
-            );
-        }
-
-        std::cout
-            << "[OK] Models are identical.\n\n";
+            << "[OK] Prompt processed.\n\n";
 
         // ====================================================
-        // Autoregressive comparison
+        // Statistics
         // ====================================================
 
-        size_t teacher_correct = 0;
-        size_t greedy_correct = 0;
+        size_t top1 = 0;
+        size_t top5 = 0;
+        size_t top10 = 0;
 
-        size_t first_greedy_mismatch =
-            TEST_STEPS;
+        double rank_sum = 0.0;
+        double cross_entropy = 0.0;
 
-        std::vector<size_t> greedy_tokens;
-
-        greedy_tokens.reserve(
-            TEST_STEPS
-        );
-
-        std::cout
-            << "========================================\n";
-        std::cout
-            << "AUTOREGRESSIVE COMPARISON\n";
-        std::cout
-            << "========================================\n\n";
+        // ====================================================
+        // Header
+        // ====================================================
 
         std::cout
-            << "Step | Real | Teacher | Greedy | Status\n";
+            << "==============================================================\n";
+
         std::cout
-            << "----------------------------------------\n";
+            << "Step | Real | Pred | Rank | Top-1 | Top-5 | Top-10"
+            << " | P(real) | P(pred)\n";
+
+        std::cout
+            << "--------------------------------------------------------------\n";
+
+        // ====================================================
+        // Teacher-forced test
+        // ====================================================
 
         for (size_t step = 0;
              step < TEST_STEPS;
              ++step) {
 
             // ------------------------------------------------
-            // The real next token
+            // Real next token
             // ------------------------------------------------
 
             size_t real_token =
@@ -509,126 +478,273 @@ int main() {
                 ];
 
             // ------------------------------------------------
-            // Teacher prediction
+            // IMPORTANT:
             //
-            // Uses the REAL previous token.
+            // We need logits produced from the CURRENT
+            // correct context BEFORE feeding real_token.
+            //
+            // Therefore we have to get the output from
+            // the previous forward.
+            //
+            // To keep the logic clean, for the first step
+            // we need to process the last prompt token again
+            // and use its logits.
             // ------------------------------------------------
 
-            size_t teacher_prediction =
-                ArgMax(
-                    teacher_logits
+            std::vector<float> logits;
+
+            if (step == 0) {
+
+                // The prompt loop above already processed
+                // the last prompt token, but did not save logits.
+                // Rebuild the model state from scratch so that
+                // we can obtain the exact logits.
+
+                model.SetUseKVCache(false);
+
+                model.ResetCache();
+
+                auto prompt_input =
+                    CreateInput(
+                        std::vector<size_t>(
+                            tokens.begin() + start,
+                            tokens.begin() +
+                            start +
+                            PROMPT_SIZE
+                        )
+                    );
+
+                auto output =
+                    model.forward(
+                        prompt_input
+                    );
+
+                cudaDeviceSynchronize();
+
+                logits =
+                    CopyLastLogitsToCPU(
+                        output
+                    );
+
+                model.SetUseKVCache(true);
+                model.ResetCache();
+
+                // Re-feed prompt token-by-token
+                // to initialize KV cache again.
+
+                for (size_t i = 0;
+                     i < PROMPT_SIZE;
+                     ++i) {
+
+                    auto input =
+                        CreateInput({
+                            tokens[start + i]
+                        });
+
+                    model.forward(input);
+
+                    cudaDeviceSynchronize();
+                }
+            }
+            else {
+
+                // For subsequent steps logits were saved
+                // after feeding the previous real token.
+                //
+                // They will be stored below.
+            }
+
+            // ------------------------------------------------
+            // For step > 0, logits are already available
+            // from previous iteration.
+            // ------------------------------------------------
+
+            static std::vector<float> saved_logits;
+
+            if (step == 0) {
+                saved_logits = logits;
+            }
+
+            logits = saved_logits;
+
+            // ------------------------------------------------
+            // Prediction
+            // ------------------------------------------------
+
+            size_t prediction =
+                ArgMax(logits);
+
+            // ------------------------------------------------
+            // Rank
+            // ------------------------------------------------
+
+            size_t rank =
+                GetRank(
+                    logits,
+                    real_token
                 );
 
             // ------------------------------------------------
-            // Greedy prediction
-            //
-            // Uses its OWN previous prediction.
+            // Probability
             // ------------------------------------------------
 
-            size_t greedy_prediction =
-                ArgMax(
-                    greedy_logits
+            std::vector<float> probs =
+                Softmax(logits);
+
+            float real_probability =
+                probs[real_token];
+
+            float prediction_probability =
+                probs[prediction];
+
+            // ------------------------------------------------
+            // Statistics
+            // ------------------------------------------------
+
+            if (rank == 1) {
+                ++top1;
+            }
+
+            if (rank <= 5) {
+                ++top5;
+            }
+
+            if (rank <= 10) {
+                ++top10;
+            }
+
+            rank_sum +=
+                static_cast<double>(rank);
+
+            // Cross entropy:
+            //
+            // -log(P(real))
+            // ------------------------------------------------
+
+            cross_entropy -=
+                std::log(
+                    std::max(
+                        static_cast<double>(
+                            real_probability
+                        ),
+                        1e-12
+                    )
                 );
 
-            bool teacher_ok =
-                teacher_prediction ==
-                real_token;
-
-            bool greedy_ok =
-                greedy_prediction ==
-                real_token;
-
-            if (teacher_ok) {
-                ++teacher_correct;
-            }
-
-            if (greedy_ok) {
-                ++greedy_correct;
-            }
-
-            if (!greedy_ok &&
-                first_greedy_mismatch ==
-                    TEST_STEPS) {
-
-                first_greedy_mismatch =
-                    step;
-            }
-
-            greedy_tokens.push_back(
-                greedy_prediction
-            );
+            // ------------------------------------------------
+            // Print
+            // ------------------------------------------------
 
             std::cout
+                << std::setw(4)
                 << step
                 << " | "
+                << std::setw(4)
                 << real_token
                 << " | "
-                << teacher_prediction
+                << std::setw(4)
+                << prediction
                 << " | "
-                << greedy_prediction
+                << std::setw(4)
+                << rank
                 << " | ";
 
-            if (greedy_ok) {
-
+            if (rank == 1) {
                 std::cout
-                    << "OK";
-
+                    << " YES ";
             } else {
-
                 std::cout
-                    << "MISMATCH";
+                    << "  NO ";
             }
 
             std::cout
+                << " | ";
+
+            if (rank <= 5) {
+                std::cout
+                    << " YES ";
+            } else {
+                std::cout
+                    << "  NO ";
+            }
+
+            std::cout
+                << " | ";
+
+            if (rank <= 10) {
+                std::cout
+                    << " YES ";
+            } else {
+                std::cout
+                    << "  NO ";
+            }
+
+            std::cout
+                << " | "
+                << std::fixed
+                << std::setprecision(4)
+                << real_probability
+                << " | "
+                << prediction_probability
                 << "\n";
 
             // ------------------------------------------------
-            // Teacher forcing:
+            // Feed the REAL token.
             //
-            // Feed REAL token.
+            // This is the important teacher-forcing part.
             // ------------------------------------------------
 
-            auto teacher_input =
+            auto input =
                 CreateInput({
                     real_token
                 });
 
-            auto teacher_output =
-                teacher_model.forward(
-                    teacher_input
-                );
-
-            // ------------------------------------------------
-            // Greedy:
-            //
-            // Feed MODEL prediction.
-            // ------------------------------------------------
-
-            auto greedy_input =
-                CreateInput({
-                    greedy_prediction
-                });
-
-            auto greedy_output =
-                greedy_model.forward(
-                    greedy_input
+            auto output =
+                model.forward(
+                    input
                 );
 
             cudaDeviceSynchronize();
 
-            teacher_logits =
+            saved_logits =
                 CopyLastLogitsToCPU(
-                    teacher_output
-                );
-
-            greedy_logits =
-                CopyLastLogitsToCPU(
-                    greedy_output
+                    output
                 );
         }
 
         // ====================================================
-        // Results
+        // Final statistics
+        // ====================================================
+
+        double top1_accuracy =
+            100.0 *
+            static_cast<double>(top1) /
+            static_cast<double>(TEST_STEPS);
+
+        double top5_accuracy =
+            100.0 *
+            static_cast<double>(top5) /
+            static_cast<double>(TEST_STEPS);
+
+        double top10_accuracy =
+            100.0 *
+            static_cast<double>(top10) /
+            static_cast<double>(TEST_STEPS);
+
+        double average_rank =
+            rank_sum /
+            static_cast<double>(TEST_STEPS);
+
+        cross_entropy /=
+            static_cast<double>(TEST_STEPS);
+
+        double perplexity =
+            std::exp(
+                cross_entropy
+            );
+
+        // ====================================================
+        // Result
         // ====================================================
 
         std::cout
@@ -641,78 +757,74 @@ int main() {
             << "========================================\n";
 
         std::cout
-            << "Teacher Top-1: "
-            << 100.0 *
-                static_cast<double>(
-                    teacher_correct
-                ) /
-                static_cast<double>(
-                    TEST_STEPS
-                )
+            << "Top-1 accuracy:  "
+            << top1_accuracy
             << "%\n";
 
         std::cout
-            << "Greedy accuracy: "
-            << 100.0 *
-                static_cast<double>(
-                    greedy_correct
-                ) /
-                static_cast<double>(
-                    TEST_STEPS
-                )
+            << "Top-5 accuracy:  "
+            << top5_accuracy
             << "%\n";
 
-        if (first_greedy_mismatch <
-            TEST_STEPS) {
+        std::cout
+            << "Top-10 accuracy: "
+            << top10_accuracy
+            << "%\n";
+
+        std::cout
+            << "Average rank:    "
+            << average_rank
+            << "\n";
+
+        std::cout
+            << "Cross entropy:   "
+            << cross_entropy
+            << "\n";
+
+        std::cout
+            << "Perplexity:      "
+            << perplexity
+            << "\n";
+
+        std::cout
+            << "\n";
+
+        // ====================================================
+        // Interpretation helpers
+        // ====================================================
+
+        if (top1_accuracy >= 60.0) {
 
             std::cout
-                << "First greedy mismatch: step "
-                << first_greedy_mismatch
-                << "\n";
+                << "[OK] Top-1 prediction is strong.\n";
 
         } else {
 
             std::cout
-                << "First greedy mismatch: none\n";
+                << "[INFO] Top-1 prediction still has room "
+                << "for improvement.\n";
         }
 
-        std::cout
-            << "\nGenerated token IDs:\n";
-
-        for (size_t token :
-             greedy_tokens) {
+        if (top10_accuracy >= 85.0) {
 
             std::cout
-                << token
-                << " ";
+                << "[OK] Most real tokens are inside Top-10.\n";
+
+        } else {
+
+            std::cout
+                << "[INFO] Many real tokens are outside Top-10.\n";
         }
 
-        std::cout
-            << "\n\n";
-
         // ====================================================
-        // Decode greedy output
+        // Cleanup
         // ====================================================
 
-        std::string generated =
-            tokenizer.Decode(
-                greedy_tokens
-            );
-
-        std::cout
-            << "Greedy generated text:\n";
-        std::cout
-            << generated
-            << "\n";
+        model.SetUseKVCache(false);
+        model.ResetCache();
 
         std::cout
             << "\n========================================\n";
-
-        teacher_model.SetUseKVCache(false);
-        greedy_model.SetUseKVCache(false);
-
-        teacher_model.ResetCache();
-        greedy_model.ResetCache();
 
         return 0;
     }
