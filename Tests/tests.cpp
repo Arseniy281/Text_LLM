@@ -2,16 +2,15 @@
 #include "../Engine/Tokenizer/bpe_tokenizer.h"
 #include "../Engine/Tensor/tensor.h"
 
-#include <iostream>
-#include <vector>
-#include <string>
-#include <fstream>
-#include <random>
-#include <cmath>
-#include <algorithm>
-#include <stdexcept>
-
 #include <cuda_runtime.h>
+
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 // ============================================================
 // Настройки
@@ -32,11 +31,11 @@ const size_t BLOCKS = 4;
 const size_t HEADS = 4;
 const size_t HIDDEN = 512;
 
-const size_t CONTEXT = 32;
-const size_t GENERATE_TOKENS = 50;
+const size_t PROMPT_SIZE = 32;
+const size_t TEST_STEPS = 5;
 
 // ============================================================
-// Читаем весь файл
+// Read file
 // ============================================================
 
 std::string ReadFile(const std::string& path) {
@@ -55,48 +54,17 @@ std::string ReadFile(const std::string& path) {
 }
 
 // ============================================================
-// Печать токенов
+// CUDA tensor -> CPU vector
 // ============================================================
 
-void PrintTokens(
-    BPETokenizer& tokenizer,
-    const std::vector<size_t>& tokens
+std::vector<float> CopyLastLogitsToCPU(
+    const std::shared_ptr<Tensor>& logits
 ) {
-    std::string text = tokenizer.Decode(tokens);
-
-    std::cout << text << "\n";
-}
-
-// ============================================================
-// ArgMax
-// ============================================================
-
-size_t ArgMax(const std::vector<float>& values) {
-    size_t best = 0;
-
-    for (size_t i = 1; i < values.size(); ++i) {
-        if (values[i] > values[best]) {
-            best = i;
-        }
-    }
-
-    return best;
-}
-
-// ============================================================
-// Получить logits последней позиции
-// ============================================================
-
-std::vector<float> GetLastLogits(
-    const std::shared_ptr<Tensor>& logits,
-    size_t vocab_size
-) {
-    const std::vector<size_t>& shape =
-        logits->GetShape();
+    const auto& shape = logits->GetShape();
 
     if (shape.size() != 3) {
         throw std::runtime_error(
-            "Expected logits with rank 3"
+            "Expected logits rank 3"
         );
     }
 
@@ -106,21 +74,18 @@ std::vector<float> GetLastLogits(
         );
     }
 
-    if (shape[2] != vocab_size) {
-        throw std::runtime_error(
-            "Unexpected vocabulary size"
-        );
-    }
+    size_t seq_len = shape[1];
+    size_t vocab = shape[2];
 
-    size_t last_position = shape[1] - 1;
+    std::vector<float> result(vocab);
 
-    std::vector<float> result(vocab_size);
+    size_t offset =
+        (seq_len - 1) * vocab;
 
     cudaError_t error = cudaMemcpy(
         result.data(),
-        logits->Data() +
-            last_position * vocab_size,
-        vocab_size * sizeof(float),
+        logits->Data() + offset,
+        vocab * sizeof(float),
         cudaMemcpyDeviceToHost
     );
 
@@ -135,25 +100,83 @@ std::vector<float> GetLastLogits(
 }
 
 // ============================================================
-// Greedy token-by-token generation
+// Create CUDA tensor from token vector
 //
-// ВАЖНО:
-// Здесь используется именно LanguageModel::generate(),
-// потому что мы хотим проверить текущий production inference.
+// Shape:
+// [1, seq]
 // ============================================================
 
-std::vector<size_t> Generate(
-    LanguageModel& model,
-    const std::vector<size_t>& prompt,
-    size_t count
+std::shared_ptr<Tensor> CreateInput(
+    const std::vector<size_t>& tokens
 ) {
-    return model.generate(
-        prompt,
-        static_cast<int>(count),
-        1.0f,
-        1.0f,
-        -1
+    auto cpu = std::make_shared<Tensor>(
+        std::vector<size_t>{
+            1,
+            tokens.size()
+        }
     );
+
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        cpu->at({0, i}) =
+            static_cast<float>(tokens[i]);
+    }
+
+    auto gpu = std::make_shared<Tensor>(
+        std::vector<size_t>{
+            1,
+            tokens.size()
+        },
+        0.0f,
+        Device::CUDA
+    );
+
+    cpu->CopyToCUDA(*gpu);
+
+    return gpu;
+}
+
+// ============================================================
+// Max absolute difference
+// ============================================================
+
+float MaxDifference(
+    const std::vector<float>& a,
+    const std::vector<float>& b
+) {
+    if (a.size() != b.size()) {
+        throw std::runtime_error(
+            "Vectors have different sizes"
+        );
+    }
+
+    float max_diff = 0.0f;
+
+    for (size_t i = 0; i < a.size(); ++i) {
+        max_diff = std::max(
+            max_diff,
+            std::abs(a[i] - b[i])
+        );
+    }
+
+    return max_diff;
+}
+
+// ============================================================
+// ArgMax
+// ============================================================
+
+size_t ArgMax(
+    const std::vector<float>& values
+) {
+    size_t best = 0;
+
+    for (size_t i = 1; i < values.size(); ++i) {
+        if (values[i] > values[best]) {
+            best = i;
+        }
+    }
+
+    return best;
 }
 
 // ============================================================
@@ -164,9 +187,12 @@ int main() {
 
     try {
 
-        std::cout << "========================================\n";
-        std::cout << "AUTOREGRESSIVE VALIDATION TEST\n";
-        std::cout << "========================================\n\n";
+        std::cout
+            << "========================================\n";
+        std::cout
+            << "KV CACHE EQUIVALENCE TEST\n";
+        std::cout
+            << "========================================\n\n";
 
         // ----------------------------------------------------
         // CUDA
@@ -177,20 +203,11 @@ int main() {
         cudaError_t error =
             cudaGetDeviceCount(&device_count);
 
-        if (error != cudaSuccess) {
-            throw std::runtime_error(
-                std::string("cudaGetDeviceCount failed: ") +
-                cudaGetErrorString(error)
-            );
-        }
+        if (error != cudaSuccess ||
+            device_count == 0) {
 
-        std::cout << "CUDA devices: "
-                  << device_count
-                  << "\n";
-
-        if (device_count == 0) {
             throw std::runtime_error(
-                "No CUDA devices found"
+                "CUDA device not available"
             );
         }
 
@@ -201,15 +218,14 @@ int main() {
             0
         );
 
-        std::cout << "GPU: "
-                  << prop.name
-                  << "\n\n";
+        std::cout
+            << "GPU: "
+            << prop.name
+            << "\n\n";
 
         // ----------------------------------------------------
         // Tokenizer
         // ----------------------------------------------------
-
-        std::cout << "Loading tokenizer...\n";
 
         BPETokenizer tokenizer;
 
@@ -217,61 +233,29 @@ int main() {
             TOKENIZER_PATH
         );
 
-        std::cout << "[OK] Tokenizer loaded.\n";
-
-        std::cout << "Vocabulary size: "
-                  << tokenizer.GetVocabSize()
-                  << "\n\n";
-
-        if (tokenizer.GetVocabSize() != VOCAB_SIZE) {
-            throw std::runtime_error(
-                "Unexpected tokenizer vocabulary size"
-            );
-        }
+        std::cout
+            << "[OK] Tokenizer loaded.\n";
 
         // ----------------------------------------------------
         // Corpus
         // ----------------------------------------------------
 
-        std::cout << "Reading corpus...\n";
-
         std::string corpus =
             ReadFile(CORPUS_PATH);
-
-        std::cout << "[OK] Corpus loaded.\n";
-        std::cout << "Corpus chars: "
-                  << corpus.size()
-                  << "\n\n";
-
-        // ----------------------------------------------------
-        // Encode
-        // ----------------------------------------------------
-
-        std::cout << "Encoding corpus...\n";
 
         std::vector<size_t> tokens =
             tokenizer.Encode(corpus);
 
-        std::cout << "[OK] Corpus encoded.\n";
+        std::cout
+            << "[OK] Corpus encoded.\n";
 
-        std::cout << "Total tokens: "
-                  << tokens.size()
-                  << "\n\n";
-
-        if (tokens.size() <
-            CONTEXT + GENERATE_TOKENS + 1) {
-
-            throw std::runtime_error(
-                "Corpus is too small"
-            );
-        }
+        std::cout
+            << "Tokens: "
+            << tokens.size()
+            << "\n\n";
 
         // ----------------------------------------------------
-        // Validation split
-        //
-        // ВАЖНО:
-        // Это тот же 90/10 split, который использовался
-        // в последнем validation test.
+        // Берём тот же validation region
         // ----------------------------------------------------
 
         size_t train_size =
@@ -282,123 +266,45 @@ int main() {
         size_t validation_start =
             train_size;
 
-        size_t validation_size =
-            tokens.size() - validation_start;
+        // Используем тот же offset,
+        // который был в предыдущем тесте.
+        size_t start =
+            validation_start + 14136;
 
-        std::cout << "Validation split:\n";
-        std::cout << "  Train tokens: "
-                  << train_size
-                  << "\n";
-
-        std::cout << "  Validation tokens: "
-                  << validation_size
-                  << "\n\n";
-
-        if (validation_size <
-            CONTEXT + GENERATE_TOKENS + 1) {
+        if (start + PROMPT_SIZE >=
+            tokens.size()) {
 
             throw std::runtime_error(
-                "Validation split is too small"
+                "Invalid test position"
             );
         }
 
-        // ----------------------------------------------------
-        // Выбираем случайное окно
-        // ----------------------------------------------------
-
-        const size_t usable =
-            validation_size -
-            CONTEXT -
-            GENERATE_TOKENS;
-
-        std::mt19937 rng(42);
-
-        std::uniform_int_distribution<size_t>
-            dist(0, usable);
-
-        size_t local_start = dist(rng);
-
-        size_t start =
-            validation_start +
-            local_start;
-
-        // ----------------------------------------------------
-        // Prompt
-        // ----------------------------------------------------
-
         std::vector<size_t> prompt;
 
-        prompt.reserve(CONTEXT);
+        for (size_t i = 0;
+             i < PROMPT_SIZE;
+             ++i) {
 
-        for (size_t i = 0; i < CONTEXT; ++i) {
             prompt.push_back(
                 tokens[start + i]
             );
         }
 
-        // ----------------------------------------------------
-        // Реальное продолжение
-        // ----------------------------------------------------
+        std::cout
+            << "Prompt token position: "
+            << start
+            << "\n";
 
-        std::vector<size_t> real_continuation;
-
-        real_continuation.reserve(
-            GENERATE_TOKENS
-        );
-
-        for (size_t i = 0;
-             i < GENERATE_TOKENS;
-             ++i) {
-
-            real_continuation.push_back(
-                tokens[
-                    start +
-                    CONTEXT +
-                    i
-                ]
-            );
-        }
+        std::cout
+            << "Prompt tokens: "
+            << prompt.size()
+            << "\n\n";
 
         // ----------------------------------------------------
-        // Информация
+        // Создаём ДВЕ одинаковые модели
         // ----------------------------------------------------
 
-        std::cout << "========================================\n";
-        std::cout << "VALIDATION WINDOW\n";
-        std::cout << "========================================\n\n";
-
-        std::cout << "Token position: "
-                  << start
-                  << "\n\n";
-
-        std::cout << "PROMPT (" << CONTEXT
-                  << " tokens):\n";
-
-        PrintTokens(
-            tokenizer,
-            prompt
-        );
-
-        std::cout << "\n";
-
-        std::cout << "REAL CONTINUATION ("
-                  << GENERATE_TOKENS
-                  << " tokens):\n";
-
-        PrintTokens(
-            tokenizer,
-            real_continuation
-        );
-
-        std::cout << "\n";
-
-        // ----------------------------------------------------
-        // Создаём модель
-        // ----------------------------------------------------
-
-        std::cout << "Creating model...\n";
-
-        LanguageModel model(
+        LanguageModel full_model(
             VOCAB_SIZE,
             EMBED_DIM,
             BLOCKS,
@@ -407,238 +313,285 @@ int main() {
             Device::CUDA
         );
 
-        std::cout << "[OK] Model created.\n";
+        LanguageModel cache_model(
+            VOCAB_SIZE,
+            EMBED_DIM,
+            BLOCKS,
+            HEADS,
+            HIDDEN,
+            Device::CUDA
+        );
+
+        std::cout
+            << "[OK] Models created.\n";
 
         // ----------------------------------------------------
-        // Load
+        // Загружаем одинаковые веса
         // ----------------------------------------------------
 
-        std::cout << "Loading model...\n";
-
-        model.LoadModel(
+        full_model.LoadModel(
             MODEL_PATH
         );
 
-        std::cout << "[OK] Model loaded.\n\n";
-
-        // ----------------------------------------------------
-        // Generation
-        // ----------------------------------------------------
-
-        std::cout << "Generating "
-                  << GENERATE_TOKENS
-                  << " tokens...\n";
-
-        std::vector<size_t> generated =
-            Generate(
-                model,
-                prompt,
-                GENERATE_TOKENS
-            );
-
-        std::cout << "[OK] Generation finished.\n\n";
-
-        // ----------------------------------------------------
-        // Проверяем количество
-        // ----------------------------------------------------
-
-        std::cout << "Generated tokens: "
-                  << generated.size()
-                  << "\n";
-
-        if (generated.size() !=
-            GENERATE_TOKENS) {
-
-            std::cout
-                << "[WARNING] Generated token count differs.\n";
-        }
-
-        // ----------------------------------------------------
-        // Проверяем IDs
-        // ----------------------------------------------------
-
-        bool ids_valid = true;
-
-        for (size_t id : generated) {
-
-            if (id >= VOCAB_SIZE) {
-                ids_valid = false;
-
-                std::cout
-                    << "[ERROR] Invalid token id: "
-                    << id
-                    << "\n";
-            }
-        }
-
-        if (ids_valid) {
-            std::cout
-                << "[OK] All generated token ids are valid.\n";
-        }
-
-        // ----------------------------------------------------
-        // Печать generation
-        // ----------------------------------------------------
-
-        std::cout << "\n";
-        std::cout << "========================================\n";
-        std::cout << "GENERATED CONTINUATION\n";
-        std::cout << "========================================\n\n";
-
-        PrintTokens(
-            tokenizer,
-            generated
+        cache_model.LoadModel(
+            MODEL_PATH
         );
 
-        std::cout << "\n";
+        std::cout
+            << "[OK] Models loaded.\n\n";
 
         // ----------------------------------------------------
-        // Token-by-token comparison
+        // FULL MODEL
         // ----------------------------------------------------
 
-        size_t compare_count =
-            std::min(
-                generated.size(),
-                real_continuation.size()
-            );
-
-        size_t matches = 0;
-
-        size_t first_mismatch =
-            compare_count;
-
-        for (size_t i = 0;
-             i < compare_count;
-             ++i) {
-
-            if (generated[i] ==
-                real_continuation[i]) {
-
-                ++matches;
-
-            } else if (
-                first_mismatch ==
-                compare_count) {
-
-                first_mismatch = i;
-            }
-        }
+        full_model.SetUseKVCache(false);
+        full_model.ResetCache();
 
         // ----------------------------------------------------
-        // Результаты
+        // CACHE MODEL
+        // ----------------------------------------------------
+
+        cache_model.SetUseKVCache(true);
+        cache_model.ResetCache();
+
+        // ----------------------------------------------------
+        // Сначала сравниваем весь prompt
         // ----------------------------------------------------
 
         std::cout
             << "========================================\n";
         std::cout
-            << "AUTOREGRESSIVE RESULTS\n";
+            << "PROMPT COMPARISON\n";
         std::cout
             << "========================================\n\n";
 
-        std::cout
-            << "Compared tokens: "
-            << compare_count
-            << "\n";
+        auto full_input =
+            CreateInput(prompt);
 
-        std::cout
-            << "Exact matches:   "
-            << matches
-            << "\n";
+        auto full_output =
+            full_model.forward(full_input);
 
-        if (compare_count > 0) {
+        cudaDeviceSynchronize();
 
-            float accuracy =
-                static_cast<float>(matches) /
-                static_cast<float>(compare_count);
+        auto full_logits =
+            CopyLastLogitsToCPU(full_output);
 
-            std::cout
-                << "Token accuracy:   "
-                << accuracy * 100.0f
-                << "%\n";
+        std::vector<float> cache_logits;
+
+        // Подаём prompt в cache model
+        // по одному токену.
+
+        for (size_t i = 0;
+             i < prompt.size();
+             ++i) {
+
+            std::vector<size_t> one_token = {
+                prompt[i]
+            };
+
+            auto input =
+                CreateInput(one_token);
+
+            auto output =
+                cache_model.forward(input);
+
+            cudaDeviceSynchronize();
+
+            cache_logits =
+                CopyLastLogitsToCPU(output);
         }
 
-        if (first_mismatch < compare_count) {
+        float prompt_diff =
+            MaxDifference(
+                full_logits,
+                cache_logits
+            );
+
+        size_t full_prediction =
+            ArgMax(full_logits);
+
+        size_t cache_prediction =
+            ArgMax(cache_logits);
+
+        std::cout
+            << "Full forward prediction:  "
+            << full_prediction
+            << "\n";
+
+        std::cout
+            << "KV cache prediction:      "
+            << cache_prediction
+            << "\n";
+
+        std::cout
+            << "Max logits difference:    "
+            << prompt_diff
+            << "\n";
+
+        if (prompt_diff < 1e-4f) {
 
             std::cout
-                << "First mismatch:   token "
-                << first_mismatch
-                << "\n";
+                << "[OK] Prompt KV equivalence.\n";
 
-            std::cout
-                << "Expected token:  "
-                << real_continuation[first_mismatch]
-                << "\n";
-
-            std::cout
-                << "Generated token: "
-                << generated[first_mismatch]
-                << "\n";
         } else {
 
             std::cout
-                << "No mismatches in compared tokens.\n";
+                << "[ERROR] Prompt KV mismatch!\n";
         }
 
         // ----------------------------------------------------
-        // Первые несколько токенов отдельно
+        // Теперь добавляем токены
         // ----------------------------------------------------
 
-        std::cout << "\n";
         std::cout
-            << "FIRST 10 TOKENS:\n";
+            << "\n";
+        std::cout
+            << "========================================\n";
+        std::cout
+            << "AUTOREGRESSIVE KV COMPARISON\n";
+        std::cout
+            << "========================================\n\n";
 
-        size_t first_count =
-            std::min<size_t>(
-                10,
-                compare_count
-            );
+        std::vector<size_t> sequence =
+            prompt;
 
-        for (size_t i = 0;
-             i < first_count;
-             ++i) {
+        bool all_ok = true;
+
+        for (size_t step = 0;
+             step < TEST_STEPS;
+             ++step) {
+
+            // ------------------------------------------------
+            // FULL PREFIX
+            // ------------------------------------------------
+
+            auto full_prefix_input =
+                CreateInput(sequence);
+
+            auto full_prefix_output =
+                full_model.forward(
+                    full_prefix_input
+                );
+
+            cudaDeviceSynchronize();
+
+            auto full_prefix_logits =
+                CopyLastLogitsToCPU(
+                    full_prefix_output
+                );
+
+            // ------------------------------------------------
+            // CACHE
+            //
+            // Здесь cache_model уже содержит prompt.
+            // Поэтому подаём только новый токен.
+            // ------------------------------------------------
+
+            size_t token =
+                tokens[
+                    start +
+                    PROMPT_SIZE +
+                    step
+                ];
+
+            auto next_input =
+                CreateInput({token});
+
+            auto cache_output =
+                cache_model.forward(
+                    next_input
+                );
+
+            cudaDeviceSynchronize();
+
+            auto current_cache_logits =
+                CopyLastLogitsToCPU(
+                    cache_output
+                );
+
+            // ------------------------------------------------
+            // Compare
+            // ------------------------------------------------
+
+            float diff =
+                MaxDifference(
+                    full_prefix_logits,
+                    current_cache_logits
+                );
+
+            size_t full_prediction =
+                ArgMax(full_prefix_logits);
+
+            size_t cache_prediction =
+                ArgMax(current_cache_logits);
 
             std::cout
-                << i
-                << ": expected="
-                << real_continuation[i]
-                << ", generated="
-                << generated[i];
+                << "Step "
+                << step
+                << ":\n";
 
-            if (real_continuation[i] ==
-                generated[i]) {
+            std::cout
+                << "  Input token:      "
+                << token
+                << "\n";
 
-                std::cout << "  [MATCH]";
+            std::cout
+                << "  Full prediction:  "
+                << full_prediction
+                << "\n";
+
+            std::cout
+                << "  Cache prediction: "
+                << cache_prediction
+                << "\n";
+
+            std::cout
+                << "  Max difference:   "
+                << diff
+                << "\n";
+
+            if (diff < 1e-4f) {
+
+                std::cout
+                    << "  [OK]\n";
 
             } else {
 
-                std::cout << "  [MISS]";
+                std::cout
+                    << "  [ERROR]\n";
+
+                all_ok = false;
             }
 
-            std::cout << "\n";
+            // Добавляем тот же настоящий токен
+            // в sequence для следующего full forward.
+
+            sequence.push_back(token);
         }
 
         // ----------------------------------------------------
-        // Итог
+        // RESULT
         // ----------------------------------------------------
 
-        std::cout << "\n";
+        std::cout
+            << "\n";
         std::cout
             << "========================================\n";
 
-        if (ids_valid) {
+        if (all_ok &&
+            prompt_diff < 1e-4f) {
 
             std::cout
-                << "[OK] AUTOREGRESSIVE TEST FINISHED\n";
+                << "[OK] KV CACHE EQUIVALENCE PASSED\n";
 
         } else {
 
             std::cout
-                << "[ERROR] AUTOREGRESSIVE TEST FAILED\n";
+                << "[ERROR] KV CACHE EQUIVALENCE FAILED\n";
         }
 
         std::cout
             << "========================================\n";
-
     }
     catch (const std::exception& e) {
 
