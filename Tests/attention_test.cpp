@@ -21,10 +21,10 @@
 
 const size_t VOCAB_SIZE = 1000;
 
-const size_t EMBED_DIM = 128;
-const size_t BLOCKS = 4;
-const size_t HEADS = 4;
-const size_t HIDDEN = 512;
+const size_t EMBED_DIM = 256;
+const size_t BLOCKS = 6;
+const size_t HEADS = 8;
+const size_t HIDDEN = 1024;
 
 const size_t CONTEXT = 128;
 const size_t BATCH_SIZE = 16;
