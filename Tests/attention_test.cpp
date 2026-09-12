@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <stdexcept>
 #include <algorithm>
+#include <memory>
 
 // ============================================================
 // Настройки
@@ -21,10 +22,11 @@
 
 const size_t VOCAB_SIZE = 1000;
 
-const size_t EMBED_DIM = 256;
-const size_t BLOCKS = 6;
-const size_t HEADS = 8;
-const size_t HIDDEN = 1024;
+// Наша прошлая небольшая модель
+const size_t EMBED_DIM = 128;
+const size_t BLOCKS = 4;
+const size_t HEADS = 4;
+const size_t HIDDEN = 512;
 
 const size_t CONTEXT = 128;
 const size_t BATCH_SIZE = 16;
@@ -32,6 +34,11 @@ const size_t BATCH_SIZE = 16;
 const size_t STEPS = 6000;
 
 const float LR = 0.0003f;
+const float WEIGHT_DECAY = 0.05f;
+
+const float BETA1 = 0.9f;
+const float BETA2 = 0.999f;
+const float EPS = 1e-8f;
 
 const size_t VALIDATION_EVERY = 100;
 const size_t VALIDATION_BATCHES = 20;
@@ -44,8 +51,9 @@ const std::string DATA_PATH =
 const std::string TOKENIZER_PATH =
     "../Models/MargaritaTokenizer";
 
+// Новый checkpoint, чтобы не затереть старый
 const std::string MODEL_PATH =
-    "../Models/MargaritaWeightDecay_best";
+    "../Models/MargaritaSmaller_clean_best";
 
 // ============================================================
 // CUDA scalar -> CPU
@@ -201,7 +209,7 @@ int main() {
 
         std::cout
             << "========================================\n"
-            << " CONSTANT LR CUDA TRAINING TEST\n"
+            << " SMALL MODEL CUDA TRAINING\n"
             << "========================================\n\n";
 
         // ----------------------------------------------------
@@ -327,6 +335,7 @@ int main() {
             Device::CUDA
         );
 
+        // KV cache во время обучения не нужен
         model.SetUseKVCache(false);
 
         CrossEntropyLoss loss;
@@ -374,6 +383,11 @@ int main() {
         std::cout
             << "Learning rate: "
             << LR
+            << "\n";
+
+        std::cout
+            << "Weight decay: "
+            << WEIGHT_DECAY
             << "\n\n";
 
         // ----------------------------------------------------
@@ -430,7 +444,9 @@ int main() {
             << "             TRAINING\n"
             << "========================================\n\n";
 
-        double loss_sum = 0.0;
+        // Накопление loss за всё обучение.
+        // Больше не сбрасываем после validation.
+        double total_loss = 0.0;
 
         float initial_train_loss = -1.0f;
         float last_train_loss = -1.0f;
@@ -545,10 +561,10 @@ int main() {
 
             model.UpdateAdamW(
                 LR,
-                0.9f,
-                0.999f,
-                1e-8f,
-                0.05f
+                BETA1,
+                BETA2,
+                EPS,
+                WEIGHT_DECAY
             );
 
             // ------------------------------------------------
@@ -563,7 +579,7 @@ int main() {
             last_train_loss =
                 loss_value;
 
-            loss_sum += loss_value;
+            total_loss += loss_value;
 
             // ------------------------------------------------
             // Validation
@@ -574,8 +590,8 @@ int main() {
 
                 cudaDeviceSynchronize();
 
-                // Одинаковые validation windows
-                // на каждом шаге.
+                // Каждый раз проверяем абсолютно
+                // одинаковые validation windows.
                 validation_rng.seed(SEED);
 
                 float validation_loss =
@@ -589,7 +605,7 @@ int main() {
                     );
 
                 double average_train_loss =
-                    loss_sum /
+                    total_loss /
                     static_cast<double>(
                         step + 1
                     );
@@ -606,6 +622,10 @@ int main() {
                     << average_train_loss
                     << " | Val: "
                     << validation_loss;
+
+                // ------------------------------------------------
+                // BEST MODEL
+                // ------------------------------------------------
 
                 if (validation_loss < best_validation) {
 
@@ -625,8 +645,6 @@ int main() {
 
                 std::cout
                     << "\n";
-
-                loss_sum = 0.0;
             }
         }
 
@@ -673,9 +691,13 @@ int main() {
             << "\n";
 
         std::cout
-            << "Best model saved to:\n"
+            << "\nBest model saved to:\n"
             << MODEL_PATH
             << "\n";
+
+        // ----------------------------------------------------
+        // Checks
+        // ----------------------------------------------------
 
         if (!std::isfinite(initial_train_loss) ||
             !std::isfinite(last_train_loss) ||
@@ -700,7 +722,7 @@ int main() {
 
         std::cout
             << "\n========================================\n"
-            << " CONSTANT LR TRAINING FINISHED\n"
+            << " SMALL MODEL TRAINING FINISHED\n"
             << "========================================\n";
 
         return 0;
