@@ -1,4 +1,4 @@
-#include "../../Engine/Tokenizer/bpe_tokenizer.h"
+#include "../Engine/Tokenizer/bpe_tokenizer.h"
 
 #include <iostream>
 #include <fstream>
