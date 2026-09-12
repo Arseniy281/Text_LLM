@@ -1,5 +1,5 @@
 #include "../Engine/Tokenizer/bpe_tokenizer.h"
-#include "../Engine/LanguageModel/language_model.h"
+#include "../Engine/Layers/language_model.h"
 
 #include <iostream>
 #include <string>
