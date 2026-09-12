@@ -25,7 +25,7 @@ const std::string MODEL_PATH =
     "../Models/EnglishSmaller_best";
 
 const std::string CORPUS_PATH =
-    "../Data/english.txt";
+    "../Data/english_final.txt";
 
 const size_t VOCAB_SIZE = 1000;
 const size_t EMBED_DIM = 128;
