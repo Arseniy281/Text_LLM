@@ -19,13 +19,13 @@
 // ============================================================
 
 const std::string TOKENIZER_PATH =
-    "../Models/MargaritaTokenizer";
+    "../Models/EnglishTokenizer";
 
 const std::string MODEL_PATH =
-    "../Models/MargaritaLR2000_final";
+    "../Models/EnglishSmaller_best";
 
 const std::string CORPUS_PATH =
-    "../Data/master_and_margarita.txt";
+    "../Data/english.txt";
 
 const size_t VOCAB_SIZE = 1000;
 const size_t EMBED_DIM = 128;
