@@ -1,120 +1,217 @@
 #include <iostream>
-#include "../Engine/Tensor/tensor.h"
-#include "../Engine/Layers/linear_layer.h"
-#include "../Engine/Layers/mse_loss.h"
-#include "../Engine/Autograd/relu.h"
-#include "../Engine/Autograd/sigmoid.h"
-#include "../Engine/Autograd/tanh_op.h"
+#include <fstream>
+#include <string>
+#include <regex>
+#include <cctype>
 
-class XORModel {
-public:
-    LinearLayer layer1;
-    TanhOp tanh1;
-    LinearLayer layer2;
-    TanhOp tanh2;
-    MSELoss mse_loss;
-
-    std::vector<std::shared_ptr<Tensor>> z1_list, a1_list, z2_list, y_pred_list;
-
-    XORModel() : layer1(2, 4), layer2(4, 1) {}
-
-    std::shared_ptr<Tensor> forward(const std::shared_ptr<Tensor>& x) {
-        auto z1 = layer1.forward(x);
-        auto a1 = tanh1.forward({z1});
-        auto z2 = layer2.forward(a1);
-        auto y_pred = tanh2.forward({z2});
-        
-        z1_list.push_back(z1);
-        a1_list.push_back(a1);
-        z2_list.push_back(z2);
-        y_pred_list.push_back(y_pred);
-        
-        return y_pred;
+bool IsServiceLine(const std::string& line) {
+    if (line.find("Sync & corrections") != std::string::npos) {
+        return true;
     }
 
-    void ClearGrad() {
-        layer1.ClearGrad();
-        layer2.ClearGrad();
-        z1_list.clear();
-        a1_list.clear();
-        z2_list.clear();
-        y_pred_list.clear();
+    if (line.find("www.") != std::string::npos) {
+        return true;
     }
 
-    void Update(float lr) {
-        layer1.Update(lr);
-        layer2.Update(lr);
+    if (line.find("http://") != std::string::npos) {
+        return true;
     }
-};
+
+    if (line.find("https://") != std::string::npos) {
+        return true;
+    }
+
+    return false;
+}
+
+std::string RemoveTags(const std::string& line) {
+    return std::regex_replace(
+        line,
+        std::regex("<[^>]*>"),
+        ""
+    );
+}
+
+std::string Trim(const std::string& line) {
+    size_t start = line.find_first_not_of(" \t\r\n");
+
+    if (start == std::string::npos) {
+        return "";
+    }
+
+    size_t end = line.find_last_not_of(" \t\r\n");
+
+    return line.substr(start, end - start + 1);
+}
+
+bool IsOnlyNoise(const std::string& line) {
+    if (line.empty()) {
+        return true;
+    }
+
+    bool has_text = false;
+
+    for (char c : line) {
+        unsigned char ch = static_cast<unsigned char>(c);
+
+        if (std::isalpha(ch) || std::isdigit(ch)) {
+            has_text = true;
+            break;
+        }
+    }
+
+    return !has_text;
+}
+
+bool IsSoundEffect(const std::string& line) {
+    if (line.size() < 3) {
+        return false;
+    }
+
+    if (line.front() != '(' || line.back() != ')') {
+        return false;
+    }
+
+    std::string text = line.substr(1, line.size() - 2);
+
+    for (char& c : text) {
+        c = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(c))
+        );
+    }
+
+    const std::string sounds[] = {
+        "laugh",
+        "laughing",
+        "sigh",
+        "sighs",
+        "cry",
+        "crying",
+        "whimper",
+        "whimpers",
+        "snarl",
+        "snarling",
+        "growl",
+        "growling",
+        "groan",
+        "groaning",
+        "moan",
+        "moaning",
+        "gasp",
+        "gasping",
+        "breath",
+        "breathing",
+        "cough",
+        "coughing",
+        "scream",
+        "screaming",
+        "shout",
+        "shouting",
+        "door",
+        "footsteps",
+        "gunshot",
+        "gunshots",
+        "explosion",
+        "explosions",
+        "phone buzzing",
+        "cell phone buzzing",
+        "music",
+        "applause",
+        "mouthing"
+    };
+
+    for (const std::string& sound : sounds) {
+        if (text.find(sound) != std::string::npos) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::string RemoveUnderscores(const std::string& line) {
+    std::string result;
+
+    for (char c : line) {
+        if (c != '_') {
+            result += c;
+        }
+    }
+
+    return result;
+}
 
 int main() {
-    std::cout << "=== XOR Test Started ===\n";
-    
-    // Данные для XOR (повтор для стабильности)
-    std::vector<std::shared_ptr<Tensor>> x_data = {
-        std::make_shared<Tensor>(Tensor({1, 2}, {0.0f, 0.0f})),
-        std::make_shared<Tensor>(Tensor({1, 2}, {0.0f, 0.0f})),
-        std::make_shared<Tensor>(Tensor({1, 2}, {0.0f, 1.0f})),
-        std::make_shared<Tensor>(Tensor({1, 2}, {0.0f, 1.0f})),
-        std::make_shared<Tensor>(Tensor({1, 2}, {1.0f, 0.0f})),
-        std::make_shared<Tensor>(Tensor({1, 2}, {1.0f, 0.0f})),
-        std::make_shared<Tensor>(Tensor({1, 2}, {1.0f, 1.0f})),
-        std::make_shared<Tensor>(Tensor({1, 2}, {1.0f, 1.0f}))
-    };
-    
-    // Правильные ответы (0 или 1)
-    std::vector<std::shared_ptr<Tensor>> y_true = {
-        std::make_shared<Tensor>(Tensor({1, 1}, 0.0f)),
-        std::make_shared<Tensor>(Tensor({1, 1}, 0.0f)),
-        std::make_shared<Tensor>(Tensor({1, 1}, 1.0f)),
-        std::make_shared<Tensor>(Tensor({1, 1}, 1.0f)),
-        std::make_shared<Tensor>(Tensor({1, 1}, 1.0f)),
-        std::make_shared<Tensor>(Tensor({1, 1}, 1.0f)),
-        std::make_shared<Tensor>(Tensor({1, 1}, 0.0f)),
-        std::make_shared<Tensor>(Tensor({1, 1}, 0.0f))
-    };
-    
-    XORModel model;
-    float learning_rate = 0.1f;
-    int epochs = 1000;
-    
-    for (int epoch = 0; epoch < epochs; ++epoch) {
-        float total_loss = 0.0f;
-        
-        for (size_t i = 0; i < x_data.size(); ++i) {
-            auto y_pred = model.forward(x_data[i]);
-            auto loss = model.mse_loss.forward(y_pred, y_true[i]);
-            total_loss += loss->at(0);
-            
-            Tensor grad_output({1, 1}, 1.0f);
-            loss->backward(grad_output);
-        }
-        
-        model.Update(learning_rate);
-        model.ClearGrad();
+    const std::string input_path =
+        "../Data/english_clean.txt";
 
-        for (auto& x : x_data) {
-            x->ClearGrad();
-        }
+    const std::string output_path =
+        "../Data/english_final.txt";
 
-        if (epoch % 200 == 0) {
-            std::cout << "Epoch " << epoch << ", Loss: " << total_loss / x_data.size() << "\n";
-        }
+    std::ifstream input(input_path);
+    std::ofstream output(output_path);
+
+    if (!input.is_open()) {
+        std::cerr << "Cannot open english_clean.txt\n";
+        return 1;
     }
-    
-    std::cout << "=== XOR Test Finished ===\n";
 
-    std::cout << "\n=== Predictions after training ===\n";
-    for (size_t i = 0; i < x_data.size(); ++i) {
-        auto y_pred = model.forward(x_data[i]);
-        std::cout << "Input: ";
-        x_data[i]->print();
-        std::cout << "Prediction: ";
-        y_pred->print();
-        std::cout << "Target: ";
-        y_true[i]->print();
-        std::cout << "\n";
+    if (!output.is_open()) {
+        std::cerr << "Cannot create english_final.txt\n";
+        return 1;
     }
+
+    std::string line;
+
+    size_t total_lines = 0;
+    size_t saved_lines = 0;
+    size_t removed_lines = 0;
+
+    while (std::getline(input, line)) {
+        total_lines++;
+
+        line = Trim(line);
+
+        if (line.empty()) {
+            continue;
+        }
+
+        if (IsServiceLine(line)) {
+            removed_lines++;
+            continue;
+        }
+
+        line = RemoveTags(line);
+        line = RemoveUnderscores(line);
+        line = Trim(line);
+
+        if (line.empty()) {
+            removed_lines++;
+            continue;
+        }
+
+        if (IsOnlyNoise(line)) {
+            removed_lines++;
+            continue;
+        }
+
+        if (IsSoundEffect(line)) {
+            removed_lines++;
+            continue;
+        }
+
+        output << line << '\n';
+        saved_lines++;
+    }
+
+    input.close();
+    output.close();
+
+    std::cout << "Done!\n";
+    std::cout << "Total lines:   " << total_lines << '\n';
+    std::cout << "Saved lines:   " << saved_lines << '\n';
+    std::cout << "Removed lines: " << removed_lines << '\n';
+    std::cout << "Output:        " << output_path << '\n';
 
     return 0;
 }
