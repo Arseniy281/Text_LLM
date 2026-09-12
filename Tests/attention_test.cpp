@@ -27,7 +27,7 @@ const size_t HIDDEN = 512;
 const size_t CONTEXT = 128;
 const size_t BATCH_SIZE = 16;
 
-const size_t STEPS = 6000;
+const size_t STEPS = 20000;
 
 const float LR = 0.0003f;
 const float WEIGHT_DECAY = 0.05f;
@@ -597,15 +597,9 @@ int main() {
                         << best_val_loss
                         << "\n";
 
-                    std::cout
-                        << "  Saving model...\n";
-
                     model.SaveModel(
                         MODEL_PATH
                     );
-
-                    std::cout
-                        << "  Model saved.\n";
                 }
 
                 std::cout << "\n";
