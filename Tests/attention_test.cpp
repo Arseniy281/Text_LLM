@@ -29,7 +29,7 @@ const size_t HIDDEN = 512;
 const size_t CONTEXT = 128;
 const size_t BATCH_SIZE = 16;
 
-const size_t STEPS = 10000;
+const size_t STEPS = 6000;
 
 const float LR = 0.0003f;
 
@@ -45,7 +45,7 @@ const std::string TOKENIZER_PATH =
     "../Models/MargaritaTokenizer";
 
 const std::string MODEL_PATH =
-    "../Models/MargaritaConstantLR_10k_best";
+    "../Models/MargaritaWeightDecay_best";
 
 // ============================================================
 // CUDA scalar -> CPU
@@ -548,7 +548,7 @@ int main() {
                 0.9f,
                 0.999f,
                 1e-8f,
-                0.01f
+                0.05f
             );
 
             // ------------------------------------------------
