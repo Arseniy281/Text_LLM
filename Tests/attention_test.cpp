@@ -578,7 +578,7 @@ int main() {
                     std::cout
                         << "  Saving model...\n";
 
-                    model.Save(
+                    model.SaveModel(
                         MODEL_PATH
                     );
 
