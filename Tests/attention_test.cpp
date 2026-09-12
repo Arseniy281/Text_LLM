@@ -27,8 +27,6 @@ const size_t HIDDEN = 512;
 const size_t CONTEXT = 128;
 const size_t BATCH_SIZE = 16;
 
-// Сначала короткий тест.
-// После успешного запуска поставить 6000.
 const size_t STEPS = 6000;
 
 const float LR = 0.0003f;
@@ -196,12 +194,20 @@ float EvaluateValidation(
 
         float loss_value = 0.0f;
 
-        cudaMemcpy(
+        cudaError_t error = cudaMemcpy(
             &loss_value,
             loss.Data(),
             sizeof(float),
             cudaMemcpyDeviceToHost
         );
+
+        if (error != cudaSuccess) {
+            throw std::runtime_error(
+                std::string(
+                    "Validation loss cudaMemcpy failed: "
+                ) + cudaGetErrorString(error)
+            );
+        }
 
         total_loss += loss_value;
     }
@@ -459,30 +465,23 @@ int main() {
 
             float loss_value = 0.0f;
 
-            cudaMemcpy(
+            cudaError_t error = cudaMemcpy(
                 &loss_value,
                 loss.Data(),
                 sizeof(float),
                 cudaMemcpyDeviceToHost
             );
 
+            if (error != cudaSuccess) {
+                throw std::runtime_error(
+                    std::string(
+                        "Training loss cudaMemcpy failed: "
+                    ) + cudaGetErrorString(error)
+                );
+            }
+
             // ------------------------------------------------
             // Backward
-            // ------------------------------------------------
-            //
-            // ВАЖНО:
-            //
-            // CrossEntropyLoss::backward()
-            // уже вычисляет dLoss / dLogits.
-            //
-            // Поэтому НЕ:
-            //
-            //     loss.backward()
-            //
-            // а:
-            //
-            //     loss_fn.backward()
-            //
             // ------------------------------------------------
 
             Tensor loss_grad =
@@ -504,7 +503,29 @@ int main() {
                 WEIGHT_DECAY
             );
 
-            cudaDeviceSynchronize();
+            // Ждём завершения CUDA optimizer kernels.
+            error = cudaDeviceSynchronize();
+
+            if (error != cudaSuccess) {
+                throw std::runtime_error(
+                    std::string(
+                        "CUDA error after AdamW: "
+                    ) + cudaGetErrorString(error)
+                );
+            }
+
+            // ------------------------------------------------
+            // ОЧЕНЬ ВАЖНО:
+            //
+            // После optimizer step градиенты текущего
+            // шага больше не нужны.
+            //
+            // На следующем backward Tensor::AddGrad()
+            // должен начать новый gradient, а не
+            // накапливать старый.
+            // ------------------------------------------------
+
+            model.ClearGrad();
 
             // ------------------------------------------------
             // Statistics
@@ -536,8 +557,9 @@ int main() {
                 loss_sum = 0.0f;
                 loss_count = 0;
 
-                // Чтобы validation была
-                // воспроизводимой.
+                // Validation должна использовать
+                // один и тот же набор случайных окон
+                // на каждом шаге.
                 validation_rng.seed(SEED);
 
                 float val_loss =
