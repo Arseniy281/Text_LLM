@@ -9,54 +9,6 @@
 #include <iomanip>
 #include <cstdlib>
 
-namespace {
-
-double add_grad_time = 0.0;
-size_t add_grad_calls = 0;
-
-void PrintAddGradProfile() {
-
-    std::cout
-        << "\n========================================\n"
-        << "       Tensor::AddGrad PROFILE\n"
-        << "========================================\n";
-
-    std::cout
-        << "Calls: "
-        << add_grad_calls
-        << "\n";
-
-    std::cout
-        << "Total: "
-        << std::fixed
-        << std::setprecision(3)
-        << add_grad_time
-        << " ms\n";
-
-    if (add_grad_calls > 0) {
-
-        std::cout
-            << "Avg:   "
-            << add_grad_time / add_grad_calls
-            << " ms\n";
-    }
-
-    std::cout
-        << "========================================\n";
-}
-
-struct AddGradProfileInitializer {
-
-    AddGradProfileInitializer() {
-
-        std::atexit(PrintAddGradProfile);
-    }
-};
-
-AddGradProfileInitializer add_grad_profile_initializer;
-
-}
-
 void Tensor::Allocate() {
 
     if (size_ == 0) {

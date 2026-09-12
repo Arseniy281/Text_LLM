@@ -27,6 +27,7 @@ const size_t HIDDEN = 512;
 const size_t CONTEXT = 128;
 const size_t BATCH_SIZE = 16;
 
+// Ещё 20 000 шагов после checkpoint.
 const size_t STEPS = 20000;
 
 const float LR = 0.0003f;
@@ -224,7 +225,7 @@ int main() {
     try {
         std::cout
             << "========================================\n"
-            << "CUDA ENGLISH LM TRAINING TEST\n"
+            << "CUDA ENGLISH LM CHECKPOINT TRAINING\n"
             << "========================================\n\n";
 
         // ====================================================
@@ -330,11 +331,23 @@ int main() {
             Device::CUDA
         );
 
-        // KV cache при обучении не используется.
-        model.SetUseKVCache(false);
+        // ====================================================
+        // 6. LOAD CHECKPOINT
+        // ====================================================
 
         std::cout
-            << "Model created.\n\n";
+            << "Loading checkpoint:\n"
+            << "  "
+            << MODEL_PATH
+            << "\n";
+
+        model.LoadModel(MODEL_PATH);
+
+        std::cout
+            << "Checkpoint loaded successfully.\n\n";
+
+        // KV cache при обучении не используется.
+        model.SetUseKVCache(false);
 
         std::cout
             << "Model configuration:\n"
@@ -345,23 +358,23 @@ int main() {
             << "  Hidden:   " << HIDDEN << "\n"
             << "  Context:  " << CONTEXT << "\n"
             << "  Batch:    " << BATCH_SIZE << "\n"
-            << "  Steps:    " << STEPS << "\n"
+            << "  New steps:" << STEPS << "\n"
             << "  LR:       " << LR << "\n"
             << "  WD:       " << WEIGHT_DECAY << "\n\n";
 
         // ====================================================
-        // 6. RNG
+        // 7. RNG
         // ====================================================
 
         std::mt19937 rng(SEED);
         std::mt19937 validation_rng(SEED);
 
         // ====================================================
-        // 7. Initial validation
+        // 8. Initial validation
         // ====================================================
 
         std::cout
-            << "Running initial validation...\n";
+            << "Running validation on loaded checkpoint...\n";
 
         float initial_val_loss =
             EvaluateValidation(
@@ -373,7 +386,7 @@ int main() {
             );
 
         std::cout
-            << "Initial validation loss: "
+            << "Checkpoint validation loss: "
             << initial_val_loss
             << "\n\n";
 
@@ -383,12 +396,12 @@ int main() {
         size_t best_step = 0;
 
         // ====================================================
-        // 8. Training
+        // 9. Training
         // ====================================================
 
         std::cout
             << "========================================\n"
-            << "START TRAINING\n"
+            << "START CHECKPOINT TRAINING\n"
             << "========================================\n\n";
 
         float loss_sum = 0.0f;
@@ -503,7 +516,6 @@ int main() {
                 WEIGHT_DECAY
             );
 
-            // Ждём завершения CUDA optimizer kernels.
             error = cudaDeviceSynchronize();
 
             if (error != cudaSuccess) {
@@ -515,14 +527,7 @@ int main() {
             }
 
             // ------------------------------------------------
-            // ОЧЕНЬ ВАЖНО:
-            //
-            // После optimizer step градиенты текущего
-            // шага больше не нужны.
-            //
-            // На следующем backward Tensor::AddGrad()
-            // должен начать новый gradient, а не
-            // накапливать старый.
+            // Clear gradients
             // ------------------------------------------------
 
             model.ClearGrad();
@@ -557,9 +562,6 @@ int main() {
                 loss_sum = 0.0f;
                 loss_count = 0;
 
-                // Validation должна использовать
-                // один и тот же набор случайных окон
-                // на каждом шаге.
                 validation_rng.seed(SEED);
 
                 float val_loss =
@@ -607,7 +609,7 @@ int main() {
         }
 
         // ====================================================
-        // 9. Finish
+        // 10. Finish
         // ====================================================
 
         auto training_end =
@@ -620,31 +622,31 @@ int main() {
 
         std::cout
             << "========================================\n"
-            << "TRAINING FINISHED\n"
+            << "CHECKPOINT TRAINING FINISHED\n"
             << "========================================\n\n";
 
         std::cout
-            << "Initial validation loss: "
+            << "Initial checkpoint validation loss: "
             << initial_val_loss
             << "\n";
 
         std::cout
-            << "Best validation loss:    "
+            << "Best validation loss:                "
             << best_val_loss
             << "\n";
 
         std::cout
-            << "Best step:               "
+            << "Best continuation step:              "
             << best_step
             << "\n";
 
         std::cout
-            << "Training time:           "
+            << "Training time:                       "
             << total_seconds
             << " sec\n";
 
         std::cout
-            << "Model path:              "
+            << "Model path:                          "
             << MODEL_PATH
             << "\n\n";
 
@@ -653,12 +655,13 @@ int main() {
                 << "[WARNING] Validation loss did not improve.\n";
         } else {
             std::cout
-                << "[OK] Best model saved successfully.\n";
+                << "[OK] Improved checkpoint saved.\n";
         }
 
         return 0;
-    }
-    catch (const std::exception& e) {
+
+    } catch (const std::exception& e) {
+
         std::cerr
             << "\n[ERROR] "
             << e.what()
