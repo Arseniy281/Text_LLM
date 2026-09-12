@@ -29,7 +29,7 @@ const size_t BATCH_SIZE = 16;
 
 // Сначала короткий тест.
 // После успешного запуска поставить 6000.
-const size_t STEPS = 200;
+const size_t STEPS = 6000;
 
 const float LR = 0.0003f;
 const float WEIGHT_DECAY = 0.05f;
