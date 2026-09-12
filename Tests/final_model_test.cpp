@@ -1,186 +1,375 @@
-#include "../Engine/Tokenizer/bpe_tokenizer.h"
+#include"../Engine/Layers/language_model.h"
+#include"../Engine/Tokenizer/bpe_tokenizer.h"
 
-#include <iostream>
-#include <fstream>
-#include <string>
-#include <stdexcept>
+#include<cuda_runtime.h>
 
-// ============================================================
-// Настройки
-// ============================================================
+#include<iostream>
+#include<vector>
+#include<string>
+#include<stdexcept>
+#include<cmath>
 
-const size_t VOCAB_SIZE = 1000;
+//============================================================
+//Настройкимодели
+//============================================================
 
-const std::string DATA_PATH =
-    "../Data/english_final.txt";
+constsize_tVOCAB_SIZE=1000;
+constsize_tEMBED_DIM=128;
+constsize_tBLOCKS=4;
+constsize_tHEADS=4;
+constsize_tHIDDEN=512;
 
-const std::string TOKENIZER_PATH =
-    "../Models/EnglishTokenizer";
+//============================================================
+//Настройкигенерации
+//============================================================
 
-// ============================================================
-// Загрузка текста
-// ============================================================
+constintMAX_NEW_TOKENS=100;
+constfloatTEMPERATURE=0.8f;
+constfloatTOP_P=0.9f;
 
-std::string LoadText(const std::string& path) {
-    std::ifstream file(path);
+//-1=неиспользоватьспециальныйendtoken
+constintEND_TOKEN_ID=-1;
 
-    if (!file.is_open()) {
-        throw std::runtime_error(
-            "Cannot open corpus: " + path
-        );
-    }
+//============================================================
+//Пути
+//============================================================
 
-    return std::string(
-        (std::istreambuf_iterator<char>(file)),
-        std::istreambuf_iterator<char>()
-    );
+conststd::stringTOKENIZER_PATH=
+"../Models/EnglishTokenizer";
+
+conststd::stringMODEL_PATH=
+"../Models/EnglishSmaller_best";
+
+//============================================================
+//ПроверкаCUDA
+//============================================================
+
+voidCheckCUDA(){
+cudaError_terror=
+cudaGetLastError();
+
+if(error!=cudaSuccess){
+throwstd::runtime_error(
+std::string("CUDAerror:")+
+cudaGetErrorString(error)
+);
+}
 }
 
-// ============================================================
-// Main
-// ============================================================
+//============================================================
+//Одинтестгенерации
+//============================================================
 
-int main() {
-    try {
-        std::cout
-            << "========================================\n"
-            << "ENGLISH BPE TOKENIZER TRAINING\n"
-            << "========================================\n\n";
+voidRunGenerationTest(
+LanguageModel&model,
+BPETokenizer&tokenizer,
+conststd::string&prompt,
+inttest_number
+){
+std::cout
+<<"\n========================================\n"
+<<"GENERATIONTEST"
+<<test_number
+<<"\n"
+<<"========================================\n\n";
 
-        // ----------------------------------------------------
-        // 1. Загружаем корпус
-        // ----------------------------------------------------
+std::cout
+<<"Prompt:\n"
+<<prompt
+<<"\n\n";
 
-        std::cout << "Loading corpus...\n";
+//========================================================
+//Encode
+//========================================================
 
-        std::string text =
-            LoadText(DATA_PATH);
+std::vector<size_t>prompt_tokens=
+tokenizer.Encode(prompt);
 
-        std::cout
-            << "Characters: "
-            << text.size()
-            << "\n\n";
+if(prompt_tokens.empty()){
+throwstd::runtime_error(
+"Promptproducedzerotokens"
+);
+}
 
-        if (text.empty()) {
-            throw std::runtime_error(
-                "Corpus is empty"
-            );
-        }
+std::cout
+<<"Prompttokens:"
+<<prompt_tokens.size()
+<<"\n";
 
-        // ----------------------------------------------------
-        // 2. Создаём tokenizer
-        // ----------------------------------------------------
+//========================================================
+//Generate
+//========================================================
 
-        BPETokenizer tokenizer;
+std::vector<size_t>generated=
+model.generate(
+prompt_tokens,
+MAX_NEW_TOKENS,
+TEMPERATURE,
+TOP_P,
+END_TOKEN_ID
+);
 
-        std::cout
-            << "Training BPE tokenizer...\n";
+CheckCUDA();
 
-        std::cout
-            << "Target vocabulary: "
-            << VOCAB_SIZE
-            << "\n\n";
+std::cout
+<<"Generatedtokens:"
+<<generated.size()
+<<"\n\n";
 
-        // ----------------------------------------------------
-        // 3. Обучение
-        // ----------------------------------------------------
+//========================================================
+//Полныйтекст
+//========================================================
 
-        tokenizer.Train(
-            text,
-            VOCAB_SIZE
-        );
+std::vector<size_t>all_tokens;
+all_tokens.reserve(
+prompt_tokens.size()+
+generated.size()
+);
 
-        std::cout
-            << "\nTokenizer training finished.\n";
+all_tokens.insert(
+all_tokens.end(),
+prompt_tokens.begin(),
+prompt_tokens.end()
+);
 
-        std::cout
-            << "Vocabulary size: "
-            << tokenizer.GetVocabSize()
-            << "\n\n";
+all_tokens.insert(
+all_tokens.end(),
+generated.begin(),
+generated.end()
+);
 
-        // ----------------------------------------------------
-        // 4. Сохраняем
-        // ----------------------------------------------------
+std::stringresult=
+tokenizer.Decode(all_tokens);
 
-        std::cout
-            << "Saving tokenizer...\n";
+std::cout
+<<"Generatedtext:\n"
+<<"----------------------------------------\n"
+<<result
+<<"\n"
+<<"----------------------------------------\n\n";
 
-        tokenizer.Save(
-            TOKENIZER_PATH
-        );
+if(generated.empty()){
+throwstd::runtime_error(
+"Generationreturnedzerotokens"
+);
+}
 
-        std::cout
-            << "Tokenizer saved to:\n"
-            << TOKENIZER_PATH
-            << "\n\n";
+std::cout
+<<"[OK]Generationtest"
+<<test_number
+<<"passed.\n";
+}
 
-        // ----------------------------------------------------
-        // 5. Проверка Encode / Decode
-        // ----------------------------------------------------
+//============================================================
+//main
+//============================================================
 
-        std::string test_text =
-            "The Four Horsemen are coming.";
+intmain(){
+try{
+std::cout
+<<"========================================\n"
+<<"CUDAGENERATIONTEST\n"
+<<"========================================\n\n";
 
-        std::cout
-            << "Testing Encode / Decode...\n\n";
+//====================================================
+//CUDA
+//====================================================
 
-        std::cout
-            << "Original:\n"
-            << test_text
-            << "\n\n";
+intdevice_count=0;
 
-        std::vector<size_t> tokens =
-            tokenizer.Encode(test_text);
+cudaError_terror=
+cudaGetDeviceCount(&device_count);
 
-        std::cout
-            << "Tokens: "
-            << tokens.size()
-            << "\n";
+if(error!=cudaSuccess){
+throwstd::runtime_error(
+std::string("CUDAerror:")+
+cudaGetErrorString(error)
+);
+}
 
-        std::cout
-            << "Token IDs:\n";
+if(device_count==0){
+throwstd::runtime_error(
+"NoCUDAdevicesfound"
+);
+}
 
-        for (size_t id : tokens) {
-            std::cout
-                << id
-                << " ";
-        }
+cudaDevicePropprop;
 
-        std::cout << "\n\n";
+error=
+cudaGetDeviceProperties(
+&prop,
+0
+);
 
-        std::string decoded =
-            tokenizer.Decode(tokens);
+if(error!=cudaSuccess){
+throwstd::runtime_error(
+std::string(
+"cudaGetDevicePropertiesfailed:"
+)+
+cudaGetErrorString(error)
+);
+}
 
-        std::cout
-            << "Decoded:\n"
-            << decoded
-            << "\n\n";
+std::cout
+<<"GPU:"
+<<prop.name
+<<"\n\n";
 
-        // ----------------------------------------------------
-        // 6. Проверка
-        // ----------------------------------------------------
+//====================================================
+//Tokenizer
+//====================================================
 
-        if (decoded != test_text) {
-            std::cout
-                << "[WARNING] Encode/Decode changed the text.\n";
-        } else {
-            std::cout
-                << "[OK] Encode/Decode test passed.\n";
-        }
+BPETokenizertokenizer;
 
-        std::cout
-            << "\n========================================\n"
-            << "TOKENIZER TEST FINISHED\n"
-            << "========================================\n";
+std::cout
+<<"Loadingtokenizer...\n";
 
-        return 0;
-    }
-    catch (const std::exception& e) {
-        std::cerr
-            << "\n[ERROR] "
-            << e.what()
-            << "\n";
+tokenizer.Load(
+TOKENIZER_PATH
+);
 
-        return 1;
-    }
+std::cout
+<<"[OK]Tokenizerloaded.\n";
+
+std::cout
+<<"Tokenizervocabulary:"
+<<tokenizer.GetVocabSize()
+<<"\n\n";
+
+if(tokenizer.GetVocabSize()!=VOCAB_SIZE){
+throwstd::runtime_error(
+"Tokenizervocabularysizedoesnot"
+"matchmodelvocabularysize"
+);
+}
+
+//====================================================
+//Model
+//====================================================
+
+std::cout
+<<"Creatingmodel...\n";
+
+LanguageModelmodel(
+VOCAB_SIZE,
+EMBED_DIM,
+BLOCKS,
+HEADS,
+HIDDEN,
+Device::CUDA
+);
+
+std::cout
+<<"[OK]Modelcreated.\n\n";
+
+//====================================================
+//Loadbestcheckpoint
+//====================================================
+
+std::cout
+<<"Loadingmodel:\n"
+<<MODEL_PATH
+<<"\n\n";
+
+model.LoadModel(
+MODEL_PATH
+);
+
+cudaDeviceSynchronize();
+
+CheckCUDA();
+
+std::cout
+<<"[OK]Bestmodelloadedsuccessfully.\n\n";
+
+//====================================================
+//Generationsettings
+//====================================================
+
+std::cout
+<<"========================================\n"
+<<"GENERATIONSETTINGS\n"
+<<"========================================\n\n";
+
+std::cout
+<<"Maxnewtokens:"
+<<MAX_NEW_TOKENS
+<<"\n";
+
+std::cout
+<<"Temperature:"
+<<TEMPERATURE
+<<"\n";
+
+std::cout
+<<"Top-p:"
+<<TOP_P
+<<"\n";
+
+std::cout
+<<"Endtoken:"
+<<END_TOKEN_ID
+<<"\n\n";
+
+//====================================================
+//Prompts
+//====================================================
+
+RunGenerationTest(
+model,
+tokenizer,
+"Themanwalkedintotheroomand",
+1
+);
+
+RunGenerationTest(
+model,
+tokenizer,
+"Idon'tknowwhathappened,but",
+2
+);
+
+RunGenerationTest(
+model,
+tokenizer,
+"Shelookedathimandsaid",
+3
+);
+
+RunGenerationTest(
+model,
+tokenizer,
+"Itwasacoldandrainynightwhen",
+4
+);
+
+//====================================================
+//Result
+//====================================================
+
+std::cout
+<<"\n========================================\n"
+<<"RESULT\n"
+<<"========================================\n\n";
+
+std::cout
+<<"[OK]ALLGENERATIONTESTSPASSED.\n";
+
+std::cout
+<<"\n========================================\n"
+<<"[OK]GENERATIONTESTPASSED\n"
+<<"========================================\n";
+
+return0;
+}
+catch(conststd::exception&e){
+std::cerr
+<<"\n========================================\n"
+<<"FAILED\n"
+<<"========================================\n\n"
+<<e.what()
+<<"\n";
+
+return1;
+}
 }
